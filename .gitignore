@@ -1,0 +1,6 @@
+# 個人の設定・結果・ブックマークのバックアップは絶対にアップロードしない
+owned-gui-settings.json
+owned-report.html
+bookmark-backups/
+Bookmarks*
+*.log
