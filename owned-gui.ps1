@@ -197,6 +197,7 @@ $act.Controls.Add($btnRun)
 $act.Controls.Add((New-Button 'レポートをブラウザで開く' {
   if (Test-Path -LiteralPath $ReportPath) { Start-Process $ReportPath } else { Show-Info '先に「チェック開始」を押してください。' }
 }))
+$act.Controls.Add((New-Button '持っていない作品をASで検索' { Open-ASSearch }))
 $act.Controls.Add((New-Label '  見る深さ'))
 $numDepth = New-Object System.Windows.Forms.NumericUpDown
 $numDepth.Minimum = 1; $numDepth.Maximum = 6; $numDepth.Value = 2; $numDepth.Width = (px 48)
@@ -328,6 +329,20 @@ function Run-Check {
   } finally {
     $form.Cursor = 'Default'; $btnRun.Enabled = $true
   }
+}
+
+# 「持っていない」作品の RJ 番号を付けて AS の検索ページをブラウザで開く。
+# 検索は AS Patch Finder（Tampermonkey）がブラウザの中で1件ずつ行う。
+# 番号は URL の # より後ろに入れるので、ページを開いた時点ではサーバーに送られない。
+function Open-ASSearch {
+  if (-not $script:Results) { Show-Info '先に「チェック開始」を押してください。'; return }
+  $codes = @($script:Results | Where-Object Status -eq 'notowned' | ForEach-Object Code)
+  if ($codes.Count -eq 0) { Show-Info '「持っていない」作品がありません。'; return }
+  $msg = "「持っていない」$($codes.Count) 作品を anime-sharing で順番に検索します。`n`n" +
+         "ブラウザで AS の検索ページが開くので、上に出る「自動検索」の「開始」を押してください。`n" +
+         "（Tampermonkey と AS Patch Finder 1.3.0 以降が必要です）`n`n開きますか？"
+  if (-not (Ask-YesNo $msg 'AS で検索')) { return }
+  Start-Process ('https://www.anime-sharing.com/search/#apf-auto=' + ($codes -join ','))
 }
 
 function Fill-Grid {
