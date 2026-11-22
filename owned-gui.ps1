@@ -336,12 +336,21 @@ function Run-Check {
 # 番号は URL の # より後ろに入れるので、ページを開いた時点ではサーバーに送られない。
 function Open-ASSearch {
   if (-not $script:Results) { Show-Info '先に「チェック開始」を押してください。'; return }
-  $codes = @($script:Results | Where-Object Status -eq 'notowned' | ForEach-Object Code)
+  $notOwned = @($script:Results | Where-Object Status -eq 'notowned')
+  $codes = @($notOwned | ForEach-Object Code)
   if ($codes.Count -eq 0) { Show-Info '「持っていない」作品がありません。'; return }
   $msg = "「持っていない」$($codes.Count) 作品を anime-sharing で順番に検索します。`n`n" +
-         "ブラウザで AS の検索ページが開くので、上に出る「自動検索」の「開始」を押してください。`n" +
-         "（Tampermonkey と AS Patch Finder 1.3.0 以降が必要です）`n`n開きますか？"
+         "ブラウザで AS の検索ページが開くので、上に出る「自動検索」の「開始」を押してください。`n`n" +
+         "RJ番号で見つからない作品を作品名でも探したいときは、開始の前に「RJ番号を貼り付け…」を押して、" +
+         "Ctrl+V で貼り付けてから「このリストにする」を押してください（作品名をクリップボードにコピーしておきます）。`n" +
+         "（Tampermonkey と AS Patch Finder 1.5.0 以降が必要です）`n`n開きますか？"
   if (-not (Ask-YesNo $msg 'AS で検索')) { return }
+  # 「RJ番号 [タブ] 作品名」の行。作品名はURLに入れると長すぎるので、クリップボードで渡す
+  $lines = @($notOwned | ForEach-Object {
+    $t = if ($_.Title -and $_.Title -ne '(タイトル不明)') { ($_.Title -replace '[\t\r\n]+', ' ') } else { '' }
+    if ($t) { "$($_.Code)`t$t" } else { $_.Code }
+  })
+  try { [System.Windows.Forms.Clipboard]::SetText(($lines -join "`r`n")) } catch { }
   Start-Process ('https://www.anime-sharing.com/search/#apf-auto=' + ($codes -join ','))
 }
 

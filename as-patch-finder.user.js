@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.4.0
+// @version      1.5.0
 // @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
 // @updateURL    https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
@@ -20,9 +20,10 @@
   const MAX_EXTRA_PAGES = 5;      // 「残りのページも読み込む」で追加取得する最大ページ数
   const PAGE_DELAY_MS = 1200;     // ページ取得の間隔（サイトに負荷をかけないため）
 
+  // ---------- 解析 ----------
+  // （ここから「表示」の印までは画面を触らない処理だけを置く。tests/ のテストがこの範囲を読み込んで試す）
   const PATCH_RE = /patch|translat|mtl|翻訳|パッチ|日本語化|english|eng\b/i;
 
-  // ---------- 解析 ----------
   const VER_PREFIX = String.raw`(?:\bver(?:sion)?\.?\s*|\bv)`;
   const VER_NUM = String.raw`\d+(?:[._]\d+)*[a-z]?`;
   // Ver1.10 / v1.08 / Version 1.2.3、範囲なら v1.0→v1.2 / v1.10-1.20 / v1.0~1.2 / v1.0 to 1.2
@@ -165,6 +166,75 @@
     if (a.dateVer && a.dateVer !== b.dateVer) return '日付版';
     if ((a.lastDate || '') !== (b.lastDate || '')) return 'タイトル日付';
     return '投稿日';
+  }
+
+  // 保存済みのスレッドに、タイトルから版の情報を付け直す（古いバージョンで保存した結果にも効くよう、表示のたびに計算する）
+  function threadInfo(t) {
+    const pv = parseVersion(t.title);
+    const dates = parseDates(t.title);
+    if (pv.dateVer && !dates.includes(pv.dateVer)) dates.push(pv.dateVer), dates.sort();
+    return Object.assign({}, t, {
+      version: pv.version, dateVer: pv.dateVer, lastDate: dates[dates.length - 1] || null,
+      isPatch: PATCH_RE.test(t.title), isLatest: false,
+    });
+  }
+
+  // 1作品分のスレッドを並べ、最新を決める。
+  //   最新の候補はタイトルにコードがあるもの（1件もなければ、作品名で見つかったもの）。
+  //   その中にパッチ/翻訳があれば、パッチ/翻訳だけで比べる。
+  //   並び：最新 → コードあり → 作品名で見つかった → そのほか（それぞれ新しい順）
+  function rankThreads(threads) {
+    const list = threads.map(threadInfo);
+    const withCode = list.filter(t => t.hasCode);
+    const byTitle = withCode.length ? [] : list.filter(t => t.byTitle);
+    const pool = withCode.length ? withCode : byTitle;
+    const patches = pool.filter(t => t.isPatch);
+    const cands = patches.length ? patches : pool;
+    const sorted = [...cands].sort((a, b) => newer(b, a));
+    const latest = sorted[0] || null;
+    const info = { latest, basis: '', patchOnly: patches.length > 0, byTitle: byTitle.length > 0, count: cands.length };
+    if (latest) latest.isLatest = true;
+    if (latest && cands.length > 1) info.basis = decidedBy(latest, sorted[1]);
+    list.sort((a, b) => (b.isLatest - a.isLatest) || (b.hasCode - a.hasCode) || (!!b.byTitle - !!a.byTitle) || newer(b, a));
+    return { list, ...info };
+  }
+
+  // 前回と今回の検索結果を比べる。前回がない（初めて・エラーだった）ときは null。
+  //   newCount: 前回なかったスレッドの数（URLで比べる）
+  //   latestChanged: 最新のスレッドか、そのバージョンが変わったか
+  const verLabel = t => (t ? (t.version ? 'v' + t.version : t.dateVer || '版不明') : '');
+  function diffResults(prev, next) {
+    if (!prev || prev.error) return null;
+    const old = new Set(prev.threads.map(t => t.url));
+    const newCount = next.filter(t => !old.has(t.url)).length;
+    const a = rankThreads(prev.threads).latest, b = rankThreads(next).latest;
+    const latestChanged = !!b && (!a || a.url !== b.url || verLabel(a) !== verLabel(b));
+    if (!newCount && !latestChanged) return null;
+    return { newCount, latestChanged, from: a ? verLabel(a) : '', to: verLabel(b) };
+  }
+
+  // 作品名検索用のキーワード：【】[]() などの添え書きと記号を外し、長すぎれば前の方だけ使う
+  function normTitle(s) {
+    return String(s || '').normalize('NFKC').toLowerCase()
+      .replace(/[\s!-/:-@[-`{-~、。・「」『』〜～！？―ー…♪☆★◆◇■□●○※]/g, '');
+  }
+  function titleKeyword(title) {
+    let s = String(title || '').normalize('NFKC')
+      .replace(/\s*[|｜]\s*DLsite.*$/i, '')
+      .replace(/【[^】]*】|\[[^\]]*\]|\([^)]*\)|〔[^〕]*〕|《[^》]*》/g, ' ');
+    // 「～副題～」「: 副題」「 - 副題」は外して、本題だけにする
+    s = s.split(/[~〜～:：]|\s[-―]\s/).map(x => x.trim()).find(x => x.length >= 2) || '';
+    s = s.replace(/[\s!！?？♪☆★◆◇■□●○※、。・「」『』]+/g, ' ').trim();
+    // 長い題名は検索で当たりにくいので、空白で区切った最初の部分を、合わせて20文字くらいまで使う
+    const words = s.split(' ').filter(Boolean);
+    let out = '';
+    for (const w of words) { if (out && (out + w).length > 20) break; out = out ? out + ' ' + w : w; }
+    return out.length >= 2 ? out : '';
+  }
+  // 作品名検索で見つかったタイトルが、本当にその作品らしいか（キーワードの文字がそのまま入っているか）
+  function titleMatches(threadTitle, keyword) {
+    const k = normTitle(keyword);
+    return k.length >= 2 && normTitle(threadTitle).includes(k);
   }
 
   // ---------- 表示 ----------
@@ -406,7 +476,8 @@
   function loadAuto() {
     let a;
     try { a = JSON.parse(localStorage.getItem(AUTO_KEY)); } catch { a = null; }
-    return Object.assign({ queue: [], results: {}, interval: 8, staleDays: 30 }, a || {});
+    // titles: { 作品コード: 作品名 }（作品名検索に使う。貼り付けで読み込む）
+    return Object.assign({ queue: [], results: {}, titles: {}, useTitles: true, interval: 8, staleDays: 30 }, a || {});
   }
   function saveAuto() {
     try { localStorage.setItem(AUTO_KEY, JSON.stringify(auto)); }
@@ -457,7 +528,10 @@
 
   function isFresh(code) {
     const r = auto.results[code];
-    return r && !r.error && Date.now() - r.at < auto.staleDays * 86400000;
+    if (!r || r.error || Date.now() - r.at >= auto.staleDays * 86400000) return false;
+    // RJ番号で見つからず、あとから作品名が読み込まれた作品は、作品名で探し直す
+    if (auto.useTitles && !r.keyword && !r.threads.some(t => t.hasCode) && titleKeyword(auto.titles[code])) return false;
+    return true;
   }
   const pending = () => auto.queue.filter(c => !isFresh(c));
 
@@ -524,36 +598,19 @@
     return [...threads.values()];
   }
 
-  // 保存済みのスレッドに、タイトルから版の情報を付け直す（古いバージョンで保存した結果にも効くよう、表示のたびに計算する）
-  function threadInfo(t) {
-    const pv = parseVersion(t.title);
-    const dates = parseDates(t.title);
-    if (pv.dateVer && !dates.includes(pv.dateVer)) dates.push(pv.dateVer), dates.sort();
-    return Object.assign({}, t, {
-      version: pv.version, dateVer: pv.dateVer, lastDate: dates[dates.length - 1] || null,
-      isPatch: PATCH_RE.test(t.title), isLatest: false,
-    });
-  }
-
-  // 1作品分のスレッドを並べ、最新を決める。
-  //   最新の候補はタイトルにコードがあるもの。その中にパッチ/翻訳があれば、パッチ/翻訳だけで比べる。
-  //   並び：最新 → コードあり（新しい順）→ コードなし（新しい順）
-  function rankThreads(threads) {
-    const list = threads.map(threadInfo);
-    const withCode = list.filter(t => t.hasCode);
-    const patches = withCode.filter(t => t.isPatch);
-    const cands = patches.length ? patches : withCode;
-    const sorted = [...cands].sort((a, b) => newer(b, a));
-    const latest = sorted[0] || null;
-    const info = { latest, basis: '', patchOnly: patches.length > 0, count: cands.length };
-    if (latest && cands.length > 1) { latest.isLatest = true; info.basis = decidedBy(latest, sorted[1]); }
-    else if (latest) latest.isLatest = true;
-    list.sort((a, b) => (b.isLatest - a.isLatest) || (b.hasCode - a.hasCode) || newer(b, a));
-    return { list, ...info };
+  // 作品名で検索（スレッドのタイトルだけを対象に、1ページ目だけ）。すでに見つかっているURLは除く。
+  async function searchTitle(keyword, code, known) {
+    const found = new Map();
+    const doc = await fetchDoc(`${location.origin}/search/search?keywords=${encodeURIComponent(keyword)}&c[title_only]=1`);
+    parseResultRows(doc, code, found);
+    const have = new Set(known.map(t => t.url));
+    return [...found.values()]
+      .filter(t => !have.has(t.url) && titleMatches(t.title, keyword))
+      .map(t => Object.assign(t, { byTitle: true }));
   }
 
   function latestBadge(rk) {
-    const scope = rk.patchOnly ? 'パッチ/翻訳' : 'コードあり';
+    const scope = (rk.byTitle ? '作品名で見つかった' : '') + (rk.patchOnly ? 'パッチ/翻訳' : rk.byTitle ? 'スレッド' : 'コードあり');
     return rk.count > 1
       ? badge(`★ 最新（${scope}${rk.count}件中・${rk.basis}で判定）`, 'apf-latest')
       : badge(`★ 最新（${scope}はこの1件だけ）`, 'apf-latest');
@@ -572,8 +629,18 @@
         if (!code) { autoMsg('すべて検索しました。'); break; }
         autoMsg(`${code} を検索中…`);
         try {
+          const prev = auto.results[code];
           const threads = await searchCode(code);
-          auto.results[code] = { at: Date.now(), threads };
+          // RJ番号の入ったスレッドが無ければ、作品名でも探す
+          const kw = auto.useTitles && !threads.some(t => t.hasCode) ? titleKeyword(auto.titles[code]) : '';
+          if (kw) {
+            await wait(auto.interval * 1000, '作品名でも検索するまで待機中');
+            if (stopReq) break;          // 途中で止めたら、この作品は次回やり直す
+            autoMsg(`${code} を作品名でも検索中…`);
+            threads.push(...await searchTitle(kw, code, threads));
+          }
+          const changes = diffResults(prev, threads);
+          auto.results[code] = Object.assign({ at: Date.now(), threads }, kw ? { keyword: kw } : {}, changes ? { changes } : {});
           floods = 0;
         } catch (e) {
           if (e instanceof Flood) {
@@ -604,30 +671,37 @@
   }
 
   // ---- 書き出し ----
-  // 列：作品コード・種類・最新・バージョン・パッチ/翻訳・URL・タイトル
+  const changeText = ch => [ch.newCount ? `新着${ch.newCount}件` : '', ch.latestChanged ? `最新が更新（${ch.from || 'なし'}→${ch.to}）` : '']
+    .filter(Boolean).join(' ');
+
+  // 列：作品コード・種類・見つけ方・最新・バージョン・パッチ/翻訳・新着/更新・URL・タイトル
+  const TSV_HEAD = ['作品コード', '種類', '見つけ方', '最新', 'バージョン', 'パッチ/翻訳', '新着/更新', 'URL', 'タイトル'];
   function exportRows(onlyFound, onlyLatest) {
     const lines = [];
+    const blank = (c, what) => [c, what, '', '', '', '', '', '', ''];
     for (const c of auto.queue) {
       const r = auto.results[c];
-      if (!r) { if (!onlyFound) lines.push([c, '未検索', '', '', '', '', '']); continue; }
-      if (!r.threads.length) { if (!onlyFound) lines.push([c, r.error ? 'エラー' : 'なし', '', '', '', '', '']); continue; }
+      if (!r) { if (!onlyFound) lines.push(blank(c, '未検索')); continue; }
+      if (!r.threads.length) { if (!onlyFound) lines.push(blank(c, r.error ? 'エラー' : 'なし')); continue; }
+      const ch = r.changes ? changeText(r.changes) : '';
       for (const t of rankThreads(r.threads).list) {
         if (onlyLatest && !t.isLatest) continue;
-        lines.push([c, t.kind === 'thread' ? 'スレッド' : '投稿内', t.isLatest ? '★' : '',
-          t.version ? 'v' + t.version : t.dateVer || '', t.isPatch ? '○' : '', t.url, t.title]);
+        lines.push([c, t.kind === 'thread' ? 'スレッド' : '投稿内',
+          t.hasCode ? 'コード' : t.byTitle ? '作品名' : 'そのほか', t.isLatest ? '★' : '',
+          t.version ? 'v' + t.version : t.dateVer || '', t.isPatch ? '○' : '', t.isLatest ? ch : '', t.url, t.title]);
       }
     }
     return lines;
   }
   async function copyUrls(onlyLatest) {
-    const lines = exportRows(true, onlyLatest).map(l => `${l[0]}\t${l[5]}\t${l[6]}`);
+    const lines = exportRows(true, onlyLatest).map(l => `${l[0]}\t${l[7]}\t${l[8]}`);
     try {
       await navigator.clipboard.writeText(lines.join('\n'));
       autoMsg(`${onlyLatest ? '最新の' : ''}URLを${lines.length}件コピーしました（RJ番号・URL・タイトルのタブ区切り）。`);
     } catch (e) { autoMsg('コピーに失敗しました: ' + e.message); }
   }
   function saveTsv() {
-    const rows = [['作品コード', '種類', '最新', 'バージョン', 'パッチ/翻訳', 'URL', 'タイトル'], ...exportRows(false)];
+    const rows = [TSV_HEAD, ...exportRows(false)];
     const tsv = rows.map(r => r.map(x => String(x).replace(/[\t\r\n]+/g, ' ')).join('\t')).join('\r\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['﻿' + tsv], { type: 'text/tab-separated-values' }));
@@ -658,6 +732,7 @@
     .apf-auto .apf-t a{word-break:break-all}
     .apf-auto .apf-weak{opacity:.6}
     .apf-auto .apf-msg{opacity:.85}
+    .apf-auto .apf-new{background:#c2410c;color:#fff;border-color:#c2410c;font-weight:bold;white-space:normal}
   `;
 
   function el(tag, attrs, ...kids) {
@@ -691,6 +766,8 @@
     const found = auto.queue.filter(c => auto.results[c]?.threads.length).length;
     const urls = auto.queue.reduce((n, c) => n + (auto.results[c]?.threads.length || 0), 0);
     const errors = auto.queue.filter(c => auto.results[c]?.error).length;
+    const changed = auto.queue.filter(c => auto.results[c]?.changes).length;
+    const titleCount = auto.queue.filter(c => auto.titles[c]).length;
     const etaMin = Math.ceil(left * (auto.interval + 1.5) / 60);
 
     const startBtn = running
@@ -705,23 +782,30 @@
       } }), unit);
 
     const paste = el('div', { style: 'display:none' },
-      el('div', {}, 'RJ番号を貼り付けてください（ほかの文字が混ざっていてもOK）。検索対象がこのリストに置き換わります。前回までの検索結果は残ります。'),
+      el('div', {}, 'RJ番号を貼り付けてください（ほかの文字が混ざっていてもOK）。検索対象がこのリストに置き換わります。前回までの検索結果は残ります。' +
+        '「RJ番号 [タブ] 作品名」の行なら作品名も読み込み、RJ番号で見つからないときに作品名でも検索します（所持チェックの「ASで検索」がこの形でコピーします）。'),
       el('textarea', {}),
       el('div', { class: 'apf-row' },
         el('button', { type: 'button', onclick: e => {
-          const codes = importCodes(e.target.closest('div').previousElementSibling.value);
+          const text = e.target.closest('div').previousElementSibling.value;
+          const codes = importCodes(text);
           if (!codes.length) { autoMsg('RJ番号が見つかりませんでした。'); return; }
+          const titles = importTitles(text);
+          Object.assign(auto.titles, titles);
           setQueue(codes);
+          const n = Object.keys(titles).length;
+          if (n) autoMsg(`${msgText}（作品名 ${n}件も読み込みました）`);
         } }, 'このリストにする')));
 
     const view = el('select', { onchange: e => { panelView = e.target.value; renderPanel(); } },
-      ...[['found', '見つかった作品'], ['none', '見つからなかった作品'], ['todo', 'まだの作品'], ['all', 'すべて']]
+      ...[['found', '見つかった作品'], ['changed', '新着・更新あり'], ['none', '見つからなかった作品'], ['todo', 'まだの作品'], ['all', 'すべて']]
         .map(([v, t]) => el('option', { value: v, ...(panelView === v ? { selected: '' } : {}) }, t)));
 
     panel.replaceChildren(
       el('h3', {}, '自動検索（作品コードで順番に検索）'),
       el('div', { class: 'apf-row' },
         `対象 ${total}件 ／ 検索済み ${done}件 ／ 見つかった作品 ${found}件（スレッド ${urls}件）` +
+        (changed ? ` ／ 新着・更新あり ${changed}件` : '') +
         (errors ? ` ／ エラー ${errors}件` : '') + (left ? ` ／ 残り ${left}件（約${etaMin}分）` : '')),
       el('div', { class: 'apf-prog' }, el('div', { style: `width:${total ? (done / total) * 100 : 0}%` })),
       el('div', { class: 'apf-row' },
@@ -729,6 +813,11 @@
         num('interval', 3, 60, '間隔', '秒'),
         num('staleDays', 0, 365, '', '日以内に検索した作品は飛ばす'),
         el('button', { type: 'button', onclick: () => { paste.style.display = paste.style.display ? '' : 'none'; } }, 'RJ番号を貼り付け…')),
+      el('div', { class: 'apf-row' },
+        el('label', {},
+          el('input', { type: 'checkbox', ...(auto.useTitles ? { checked: '' } : {}),
+            onchange: e => { auto.useTitles = e.target.checked; saveAuto(); } }),
+          ` RJ番号で見つからないときは作品名でも検索する（作品名 ${titleCount}/${total}件 読み込み済み）`)),
       paste,
       el('div', { class: 'apf-row' },
         el('button', { type: 'button', onclick: () => copyUrls(true) }, '最新のURLだけコピー'),
@@ -739,6 +828,10 @@
           if (!confirm('検索結果をすべて消して、最初から検索し直せるようにします。よろしいですか？')) return;
           auto.results = {}; saveAuto(); renderPanel();
         } }, '結果を消す'),
+        changed ? el('button', { type: 'button', onclick: () => {
+          for (const c of auto.queue) if (auto.results[c]) delete auto.results[c].changes;
+          saveAuto(); renderPanel();
+        } }, '新着・更新の印を消す') : null,
         el('label', {}, '表示 ', view)),
       el('div', { class: 'apf-msg' }, msgText),
       resultTable());
@@ -750,14 +843,16 @@
       const r = auto.results[c];
       const has = r?.threads.length > 0;
       if (panelView === 'found' && !has) continue;
+      if (panelView === 'changed' && !r?.changes) continue;
       if (panelView === 'none' && (!r || has)) continue;
       if (panelView === 'todo' && r && !r.error) continue;
       const rk = has ? rankThreads(r.threads) : null;
       const cell = !r ? el('span', { class: 'apf-weak' }, 'まだ')
         : r.error ? el('span', {}, 'エラー: ' + r.error)
         : !has ? el('span', { class: 'apf-weak' }, 'なし')
-        : rk.list.map(t => el('div', { class: 'apf-t' + (t.hasCode ? '' : ' apf-weak') },
+        : rk.list.map(t => el('div', { class: 'apf-t' + (t.hasCode || t.byTitle ? '' : ' apf-weak') },
             t.isLatest ? latestBadge(rk) : null, t.isLatest ? ' ' : null,
+            t.byTitle ? badge('作品名で見つかった（要確認）') : null, t.byTitle ? ' ' : null,
             el('a', { href: t.url, target: '_blank', rel: 'noopener' }, t.title), ' ',
             t.version ? badge('v' + t.version, 'apf-ver') : t.dateVer ? badge('日付版 ' + t.dateVer, 'apf-ver') : null, ' ',
             t.isPatch ? badge('パッチ/翻訳') : null, ' ',
@@ -768,7 +863,9 @@
         el('td', { class: 'apf-code' },
           el('a', { href: dlsiteUrl(c), target: '_blank', rel: 'noopener noreferrer' }, c), el('br'),
           el('a', { href: `/search/search?keywords=${c}`, target: '_blank', class: 'apf-weak' }, 'ASで検索'),
-          r ? el('div', { class: 'apf-weak' }, fmtDate(r.at / 1000)) : null),
+          r ? el('div', { class: 'apf-weak' }, fmtDate(r.at / 1000)) : null,
+          r?.changes ? el('div', {}, badge(changeText(r.changes), 'apf-new')) : null,
+          r?.keyword ? el('div', { class: 'apf-weak' }, '作品名でも検索した') : null),
         el('td', {}, cell)));
     }
     if (!rows.length) return el('div', { class: 'apf-weak', style: 'margin-top:6px' }, '表示するものがありません。');
@@ -777,6 +874,15 @@
 
   function importCodes(text) {
     return [...new Set((text.match(CODE_RE_G) || []).map(s => s.toUpperCase()))];
+  }
+  // 「RJ番号 [タブ] 作品名」の行から作品名を読む
+  function importTitles(text) {
+    const out = {};
+    for (const line of text.split(/\r?\n/)) {
+      const m = line.match(/^\s*((?:RJ|VJ|BJ|RE)\d{6,8})\t+(.+?)\s*$/i);
+      if (m) out[m[1].toUpperCase()] = m[2];
+    }
+    return out;
   }
   function setQueue(codes) {
     if (running) { autoMsg('止めてから入れ替えてください。'); return; }
