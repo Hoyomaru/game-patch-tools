@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.3.0
+// @version      1.3.1
 // @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
 // @updateURL    https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
@@ -23,29 +23,40 @@
   const PATCH_RE = /patch|translat|mtl|翻訳|パッチ|日本語化|english|eng\b/i;
 
   // ---------- 解析 ----------
-  const VER_RE = /(?:\bver(?:sion)?\.?\s*|\bv)(\d+(?:[._\-/]\d+)*[a-z]?)\b/i;
+  const VER_PREFIX = String.raw`(?:\bver(?:sion)?\.?\s*|\bv)`;
+  const VER_NUM = String.raw`\d+(?:[._]\d+)*[a-z]?`;
+  // Ver1.10 / v1.08 / Version 1.2.3、範囲なら v1.0→v1.2 / v1.10-1.20 / v1.0~1.2 / v1.0 to 1.2
+  const VER_RE = new RegExp(
+    `${VER_PREFIX}(${VER_NUM})(?:\\s*(?:->|→|-|~|～|to)\\s*v?(${VER_NUM}))?(?![\\w.])`, 'i');
+  // 日付形式のバージョン：Ver26.11.08 / v26-11-08 / Ver2026.11.08 / v261108 / v20261108
+  const DATE_VER_RE = new RegExp(
+    `${VER_PREFIX}(?:(20\\d{2}|\\d{2})([._\\-/])(\\d{1,2})\\2(\\d{1,2})|(20\\d{2}|\\d{2})(\\d{2})(\\d{2}))(?![\\w.])`, 'i');
 
-  // バージョン文字列が日付の形なら 'YYYY-MM-DD' を返す。違えば null。
-  //   26.11.08 / 26-11-08 / 2026.11.08 / 261108 / 20261108
-  function dateFromVersion(s) {
-    let m = s.match(/^(\d{2}|20\d{2})[._\-/](\d{1,2})[._\-/](\d{1,2})$/) ||
-            s.match(/^(20\d{2}|\d{2})(\d{2})(\d{2})$/);
-    if (!m) return null;
-    const y = m[1].length === 2 ? 2000 + Number(m[1]) : Number(m[1]);
-    const mo = Number(m[2]), d = Number(m[3]);
-    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
-    return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const THIS_YEAR = new Date().getFullYear();
+
+  // 年月日として妥当なら 'YYYY-MM-DD'、違えば null。
+  // 2桁の年は月日も2桁のときだけ日付とみなす（v10.2.3 のような普通のバージョンを日付と取り違えないため）。
+  function ymd(y, mo, d) {
+    if (y.length === 2 && (mo.length !== 2 || d.length !== 2)) return null;
+    const yy = y.length === 2 ? 2000 + Number(y) : Number(y);
+    const m = Number(mo), dd = Number(d);
+    if (yy < 2010 || yy > THIS_YEAR + 1 || m < 1 || m > 12 || dd < 1 || dd > 31) return null;
+    return `${yy}-${String(m).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
   }
 
   // 戻り値: { version: '1.10' | null, dateVer: '2026-11-08' | null }
   function parseVersion(title) {
-    // Ver1.10 / ver2.22 / v1.08 / Version 1.2.3
-    let m = title.match(VER_RE);
+    let m = title.match(DATE_VER_RE);
     if (m) {
-      // Ver26.11.08 のような日付形式は「日付版」として扱う
-      const dv = dateFromVersion(m[1]);
+      const dv = m[1] ? ymd(m[1], m[3], m[4]) : ymd(m[5], m[6], m[7]);
       if (dv) return { version: null, dateVer: dv };
-      return { version: m[1].replace(/[_\-/]/g, '.'), dateVer: null };
+    }
+    m = title.match(VER_RE);
+    if (m) {
+      const v1 = m[1].replace(/_/g, '.'), v2 = m[2] && m[2].replace(/_/g, '.');
+      // 範囲表記（v1.0→1.2）なら後ろ側を採る。後ろの方が小さい v1.2-1 は枝番として 1.2.1 にする
+      if (v2) return { version: cmpVersion(v2, v1) > 0 ? v2 : `${v1}.${v2}`, dateVer: null };
+      return { version: v1, dateVer: null };
     }
     // [r102652] のようなリビジョン番号
     m = title.match(/\[r(\d{3,})\]/i);
@@ -54,14 +65,12 @@
   }
 
   function parseDates(title) {
-    // (2023.02.14) / 2023-02-14 / [220702] (YYMMDD)
+    // 2023.02.14 / 2023-02-14 / [230214] (230214) / [23.02.14] (23.02.14)
     const out = [];
-    for (const m of title.matchAll(/(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})/g)) {
-      out.push(`${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`);
-    }
-    for (const m of title.matchAll(/\[(\d{2})(\d{2})(\d{2})\]/g)) {
-      out.push(`20${m[1]}-${m[2]}-${m[3]}`);
-    }
+    const add = s => { if (s && !out.includes(s)) out.push(s); };
+    for (const m of title.matchAll(/(?<![\d.])(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})(?![\d.])/g)) add(ymd(m[1], m[2], m[3]));
+    for (const m of title.matchAll(/[\[(](\d{2})(\d{2})(\d{2})[\])]/g)) add(ymd(m[1], m[2], m[3]));
+    for (const m of title.matchAll(/[\[(](\d{2})([.\-/])(\d{2})\2(\d{2})[\])]/g)) add(ymd(m[1], m[3], m[4]));
     return out.sort();
   }
 
@@ -124,16 +133,38 @@
     return info;
   }
 
-  // 新しさの比較：バージョン → 日付版どうし → タイトル内の一番新しい日付 → 投稿日
-  // （片方にしか情報がない項目は比較に使わず、次の基準へ進む）
+  // 版の情報の強さ：2 = バージョン番号あり、1 = 日付版、0 = どちらもなし
+  const tier = r => (r.version ? 2 : r.dateVer ? 1 : 0);
+  const cmpStr = (a, b) => (a === b ? 0 : a < b ? -1 : 1);
+
+  // 新しさの比較。どの組み合わせでも同じ基準で比べるので、並び順で結果が変わらない。
+  //   1. 版の情報の強さ（バージョン番号あり ＞ 日付版 ＞ なし）
+  //   2. 同じ強さの中で：バージョン番号 または 日付版
+  //   3. タイトル内の一番新しい日付（ないものは古い扱い）
+  //   4. 投稿日
   function newer(a, b) {
-    if (a.version && b.version) {
+    const t = tier(a) - tier(b);
+    if (t) return t;
+    if (a.version) {
       const v = cmpVersion(a.version, b.version);
       if (v) return v;
+    } else if (a.dateVer) {
+      const v = cmpStr(a.dateVer, b.dateVer);
+      if (v) return v;
     }
-    if (a.dateVer && b.dateVer && a.dateVer !== b.dateVer) return a.dateVer < b.dateVer ? -1 : 1;
-    if (a.lastDate && b.lastDate && a.lastDate !== b.lastDate) return a.lastDate < b.lastDate ? -1 : 1;
+    const d = cmpStr(a.lastDate || '', b.lastDate || '');
+    if (d) return d;
     return a.posted - b.posted;
+  }
+
+  // 1位と2位を分けた基準（バッジに出す）
+  function decidedBy(a, b) {
+    if (!b) return '';
+    if (tier(a) !== tier(b)) return tier(b) === 0 ? 'バージョン表記の有無' : '版の表記の種類';
+    if (a.version && cmpVersion(a.version, b.version)) return 'バージョン';
+    if (a.dateVer && a.dateVer !== b.dateVer) return '日付版';
+    if ((a.lastDate || '') !== (b.lastDate || '')) return 'タイトル日付';
+    return '投稿日';
   }
 
   // ---------- 表示 ----------
@@ -182,12 +213,14 @@
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
 
-  function renderBadges(info, groupSize, isLatest) {
+  function renderBadges(info, groupSize, isLatest, basis, latest) {
     info.li.querySelector('.apf-badges')?.remove();
     const box = document.createElement('div');
     box.className = 'apf-badges';
     if (groupSize > 1) {
-      box.appendChild(isLatest ? badge(`★ 最新（${groupSize}件中）`, 'apf-latest') : badge('旧版', 'apf-old'));
+      if (isLatest) box.appendChild(badge(`★ 最新（${groupSize}件中・${basis}で判定）`, 'apf-latest'));
+      else if (tier(info) < tier(latest)) box.appendChild(badge('版不明（最新と比べられない）', 'apf-old'));
+      else box.appendChild(badge('旧版', 'apf-old'));
     }
     if (info.version) box.appendChild(badge('v' + info.version, 'apf-ver'));
     else if (info.dateVer) box.appendChild(badge('日付版 ' + info.dateVer, 'apf-ver'));
@@ -222,7 +255,8 @@
     }
     for (const g of groups.values()) {
       g.sort((a, b) => newer(b, a));
-      g.forEach((r, i) => { r.isLatest = i === 0; r.groupSize = g.length; renderBadges(r, g.length, i === 0); });
+      const basis = decidedBy(g[0], g[1]);
+      g.forEach((r, i) => { r.isLatest = i === 0; r.groupSize = g.length; renderBadges(r, g.length, i === 0, basis, g[0]); });
     }
 
     // 並べ替え
