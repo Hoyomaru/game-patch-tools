@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.3.1
+// @version      1.4.0
 // @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
 // @updateURL    https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
@@ -160,7 +160,7 @@
   // 1位と2位を分けた基準（バッジに出す）
   function decidedBy(a, b) {
     if (!b) return '';
-    if (tier(a) !== tier(b)) return tier(b) === 0 ? 'バージョン表記の有無' : '版の表記の種類';
+    if (tier(a) !== tier(b)) return tier(b) === 0 ? '版の表記の有無' : '版の表記の種類';
     if (a.version && cmpVersion(a.version, b.version)) return 'バージョン';
     if (a.dateVer && a.dateVer !== b.dateVer) return '日付版';
     if ((a.lastDate || '') !== (b.lastDate || '')) return 'タイトル日付';
@@ -521,13 +521,42 @@
       parseResultRows(doc, code, threads);
       url = nextPageUrl(doc);
     }
-    const list = [...threads.values()].map(t => {
-      const pv = parseVersion(t.title);
-      return Object.assign(t, { version: pv.version, dateVer: pv.dateVer, isPatch: PATCH_RE.test(t.title) });
+    return [...threads.values()];
+  }
+
+  // 保存済みのスレッドに、タイトルから版の情報を付け直す（古いバージョンで保存した結果にも効くよう、表示のたびに計算する）
+  function threadInfo(t) {
+    const pv = parseVersion(t.title);
+    const dates = parseDates(t.title);
+    if (pv.dateVer && !dates.includes(pv.dateVer)) dates.push(pv.dateVer), dates.sort();
+    return Object.assign({}, t, {
+      version: pv.version, dateVer: pv.dateVer, lastDate: dates[dates.length - 1] || null,
+      isPatch: PATCH_RE.test(t.title), isLatest: false,
     });
-    // タイトルにコードがあるスレッド → 新しい投稿 の順
-    list.sort((a, b) => (b.hasCode - a.hasCode) || (b.posted - a.posted));
-    return list;
+  }
+
+  // 1作品分のスレッドを並べ、最新を決める。
+  //   最新の候補はタイトルにコードがあるもの。その中にパッチ/翻訳があれば、パッチ/翻訳だけで比べる。
+  //   並び：最新 → コードあり（新しい順）→ コードなし（新しい順）
+  function rankThreads(threads) {
+    const list = threads.map(threadInfo);
+    const withCode = list.filter(t => t.hasCode);
+    const patches = withCode.filter(t => t.isPatch);
+    const cands = patches.length ? patches : withCode;
+    const sorted = [...cands].sort((a, b) => newer(b, a));
+    const latest = sorted[0] || null;
+    const info = { latest, basis: '', patchOnly: patches.length > 0, count: cands.length };
+    if (latest && cands.length > 1) { latest.isLatest = true; info.basis = decidedBy(latest, sorted[1]); }
+    else if (latest) latest.isLatest = true;
+    list.sort((a, b) => (b.isLatest - a.isLatest) || (b.hasCode - a.hasCode) || newer(b, a));
+    return { list, ...info };
+  }
+
+  function latestBadge(rk) {
+    const scope = rk.patchOnly ? 'パッチ/翻訳' : 'コードあり';
+    return rk.count > 1
+      ? badge(`★ 最新（${scope}${rk.count}件中・${rk.basis}で判定）`, 'apf-latest')
+      : badge(`★ 最新（${scope}はこの1件だけ）`, 'apf-latest');
   }
 
   async function runAuto() {
@@ -575,25 +604,30 @@
   }
 
   // ---- 書き出し ----
-  function exportRows(onlyFound) {
+  // 列：作品コード・種類・最新・バージョン・パッチ/翻訳・URL・タイトル
+  function exportRows(onlyFound, onlyLatest) {
     const lines = [];
     for (const c of auto.queue) {
       const r = auto.results[c];
-      if (!r) { if (!onlyFound) lines.push([c, '未検索', '', '']); continue; }
-      if (!r.threads.length) { if (!onlyFound) lines.push([c, r.error ? 'エラー' : 'なし', '', '']); continue; }
-      for (const t of r.threads) lines.push([c, t.kind === 'thread' ? 'スレッド' : '投稿内', t.url, t.title]);
+      if (!r) { if (!onlyFound) lines.push([c, '未検索', '', '', '', '', '']); continue; }
+      if (!r.threads.length) { if (!onlyFound) lines.push([c, r.error ? 'エラー' : 'なし', '', '', '', '', '']); continue; }
+      for (const t of rankThreads(r.threads).list) {
+        if (onlyLatest && !t.isLatest) continue;
+        lines.push([c, t.kind === 'thread' ? 'スレッド' : '投稿内', t.isLatest ? '★' : '',
+          t.version ? 'v' + t.version : t.dateVer || '', t.isPatch ? '○' : '', t.url, t.title]);
+      }
     }
     return lines;
   }
-  async function copyUrls() {
-    const lines = exportRows(true).map(l => `${l[0]}\t${l[2]}\t${l[3]}`);
+  async function copyUrls(onlyLatest) {
+    const lines = exportRows(true, onlyLatest).map(l => `${l[0]}\t${l[5]}\t${l[6]}`);
     try {
       await navigator.clipboard.writeText(lines.join('\n'));
-      autoMsg(`${lines.length}件のURLをコピーしました（RJ番号・URL・タイトルのタブ区切り）。`);
+      autoMsg(`${onlyLatest ? '最新の' : ''}URLを${lines.length}件コピーしました（RJ番号・URL・タイトルのタブ区切り）。`);
     } catch (e) { autoMsg('コピーに失敗しました: ' + e.message); }
   }
   function saveTsv() {
-    const rows = [['作品コード', '種類', 'URL', 'タイトル'], ...exportRows(false)];
+    const rows = [['作品コード', '種類', '最新', 'バージョン', 'パッチ/翻訳', 'URL', 'タイトル'], ...exportRows(false)];
     const tsv = rows.map(r => r.map(x => String(x).replace(/[\t\r\n]+/g, ' ')).join('\t')).join('\r\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['﻿' + tsv], { type: 'text/tab-separated-values' }));
@@ -697,7 +731,8 @@
         el('button', { type: 'button', onclick: () => { paste.style.display = paste.style.display ? '' : 'none'; } }, 'RJ番号を貼り付け…')),
       paste,
       el('div', { class: 'apf-row' },
-        el('button', { type: 'button', onclick: copyUrls }, '見つかったURLをコピー'),
+        el('button', { type: 'button', onclick: () => copyUrls(true) }, '最新のURLだけコピー'),
+        el('button', { type: 'button', onclick: () => copyUrls(false) }, '見つかったURLをすべてコピー'),
         el('button', { type: 'button', onclick: saveTsv }, 'ファイルに保存（TSV）'),
         el('button', { type: 'button', onclick: () => {
           if (running) { autoMsg('止めてから押してください。'); return; }
@@ -717,10 +752,12 @@
       if (panelView === 'found' && !has) continue;
       if (panelView === 'none' && (!r || has)) continue;
       if (panelView === 'todo' && r && !r.error) continue;
+      const rk = has ? rankThreads(r.threads) : null;
       const cell = !r ? el('span', { class: 'apf-weak' }, 'まだ')
         : r.error ? el('span', {}, 'エラー: ' + r.error)
         : !has ? el('span', { class: 'apf-weak' }, 'なし')
-        : r.threads.map(t => el('div', { class: 'apf-t' + (t.hasCode ? '' : ' apf-weak') },
+        : rk.list.map(t => el('div', { class: 'apf-t' + (t.hasCode ? '' : ' apf-weak') },
+            t.isLatest ? latestBadge(rk) : null, t.isLatest ? ' ' : null,
             el('a', { href: t.url, target: '_blank', rel: 'noopener' }, t.title), ' ',
             t.version ? badge('v' + t.version, 'apf-ver') : t.dateVer ? badge('日付版 ' + t.dateVer, 'apf-ver') : null, ' ',
             t.isPatch ? badge('パッチ/翻訳') : null, ' ',
