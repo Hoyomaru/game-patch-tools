@@ -355,7 +355,8 @@ function Open-ASSearch {
     $t = if ($_.Title -and $_.Title -ne '(タイトル不明)') { ($_.Title -replace '[\t\r\n]+', ' ') } else { '' }
     if ($t) { "$($_.Code)`t$t" } else { $_.Code }
   })
-  try { [System.Windows.Forms.Clipboard]::SetText(($lines -join "`r`n")) } catch { }
+  try { [System.Windows.Forms.Clipboard]::SetText(($lines -join "`r`n")) }
+  catch { Show-Info "作品名をクリップボードにコピーできませんでした（$($_.Exception.Message)）。`nRJ番号だけで検索します。作品名でも探したいときは、もう一度このボタンを押してください。" }
   Start-Process ('https://www.anime-sharing.com/search/#apf-auto=' + ($codes -join ','))
 }
 
@@ -364,7 +365,7 @@ function Fill-Grid {
   $grid.SuspendLayout()
   $grid.Rows.Clear()
   $order = @{ owned = 0; maybe = 1; notowned = 2 }
-  $show = @{ owned = $chkOwned.Checked; maybe = $chkMaybe.Checked; notowned = $chkNot.Checked }
+  $show = Get-ShownStatus
   foreach ($r in ($script:Results | Sort-Object @{ e = { $order[$_.Status] } }, @{ e = { $_.Score }; Descending = $true })) {
     if (-not $show[$r.Status]) { continue }
     $match = if ($r.Match) { "$($r.Match)`n($($r.How))" } elseif ($r.NearName) { "いちばん近い: $($r.NearName)" } else { '' }
@@ -379,10 +380,20 @@ function Fill-Grid {
   Update-DeleteButton
 }
 
+# 「表示:」のチェックで、いま表に出している判定
+function Get-ShownStatus { @{ owned = $chkOwned.Checked; maybe = $chkMaybe.Checked; notowned = $chkNot.Checked } }
+
+# 消すチェックが付いているのに、表示の絞り込みで表に出ていない作品の数
+function Get-HiddenCheckedCount {
+  $show = Get-ShownStatus
+  @($script:Results | Where-Object { $script:DelState[$_.Code] -and -not $show[$_.Status] }).Count
+}
+
 function Update-DeleteButton {
   $n = @($script:DelState.GetEnumerator() | Where-Object Value).Count
+  $hidden = Get-HiddenCheckedCount
   $btnDel.Enabled = $n -gt 0
-  $btnDel.Text = "④ チェックした $n 作品をブックマークから消す"
+  $btnDel.Text = "④ チェックした $n 作品" + $(if ($hidden) { "（表示していない $hidden 作品を含む）" } else { '' }) + "をブックマークから消す"
 }
 
 function Get-BookmarkSources { @($src.List.Items | ForEach-Object { "$_" } | Where-Object { Test-BookmarksFile $_ }) }
@@ -476,6 +487,9 @@ function Invoke-BulkAdd([string]$text, [string]$target, [string]$folder, [bool]$
   if ($plan.Skipped) { $msg += "`n・フォルダにすでにある $($plan.Skipped) 作品は追加しません" }
   if ($ownedN) { $msg += "`n・すでに持っている $ownedN 作品は追加しません" }
   if ($noTitle) { $msg += "`n・作品名がわからない $noTitle 作品は、RJ番号を名前にして追加します" }
+  if ($fetch -and $need.Count -and $script:DLsiteFailedCount) {
+    $msg += "`n・DLsite に接続できず、$($script:DLsiteFailedCount) 作品の作品名を取れませんでした（$($script:DLsiteLastError)）"
+  }
   if ($skipOwned -and $dirs.Count -and @($script:MissingGameDirs).Count) {
     $msg += "`n・見つからないゲームフォルダ $(@($script:MissingGameDirs).Count) か所は飛ばしました（その中の作品は「持っている」と判定されません）"
   }
@@ -513,6 +527,8 @@ function Delete-Checked {
   $folder = Get-SelectedFolder
   $msg = "$($codes.Count) 作品のブックマークを消します。"
   if ($maybeN) { $msg += "`n（うち「たぶん持っている」が $maybeN 作品）" }
+  $hiddenN = Get-HiddenCheckedCount
+  if ($hiddenN) { $msg += "`n（うち、表示の絞り込みで今は表に出ていないものが $hiddenN 作品）" }
   $msg += "`n対象: " + $(if ($folder) { "フォルダ「$folder」の中だけ" } else { 'ブックマーク全体' })
   $msg += "`n`n消す前にバックアップを取ります。よろしいですか？"
   if (-not (Ask-YesNo $msg '削除の確認')) { return }
@@ -529,11 +545,8 @@ function Delete-Checked {
 }
 
 function Restore-Backup {
-  $bmFiles = @(Get-BookmarkSources)
-  if ($bmFiles.Count -eq 0) { Show-Info '① に戻し先の Chrome / Edge のブックマークを追加してください。'; return }
-  $target = if ($bmFiles.Count -eq 1) { $bmFiles[0] }
-            elseif ($src.List.SelectedItem -and (Test-BookmarksFile "$($src.List.SelectedItem)")) { "$($src.List.SelectedItem)" }
-            else { Show-Info 'ブックマークが複数あるので、① で戻し先のブックマークを選んでから押してください。'; return }
+  $target = Get-TargetBookmarks '戻し先'
+  if (-not $target) { return }
   if (-not (Test-Path -LiteralPath $BackupDir)) { Show-Info 'バックアップはまだありません。'; return }
   $dlg = New-Object System.Windows.Forms.OpenFileDialog
   $dlg.Title = '戻すバックアップを選ぶ'
@@ -543,8 +556,7 @@ function Restore-Backup {
   if (-not (Test-BookmarksFile $dlg.FileName)) { Show-Error 'このファイルはブックマークのバックアップではないようです。'; return }
   if (-not (Ask-YesNo "次のバックアップでブックマークを上書きします。`n`nバックアップ: $(Split-Path $dlg.FileName -Leaf)`n戻し先: $target`n`n今のブックマークも念のためバックアップしてから戻します。よろしいですか？" '復元の確認')) { return }
   if (-not (Wait-BrowserClosed $target)) { return }
-  New-Item -ItemType Directory -Force $BackupDir | Out-Null
-  Copy-Item -LiteralPath $target -Destination (Join-Path $BackupDir ("Bookmarks-before-restore-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss')))
+  [void](Backup-BookmarksFile $target $BackupDir 'before-restore')
   Copy-Item -LiteralPath $dlg.FileName -Destination $target -Force
   Show-Info '戻しました。ブラウザを起動して確認してください。'
 }

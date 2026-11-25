@@ -191,12 +191,14 @@ function Compare-Owned($Wishlist, $Candidates, [double]$Threshold = 0.6) {
         $how = if ($m[2]) { '作品名が一致' } else { '作品名が似ている' }
       }
     }
+    # 「持っている」は RJ番号か作品名の完全一致（1.0）だけ。0.999 なのは小数の誤差よけ。似ているだけなら「たぶん」止まり
     $status = if ($bestScore -ge 0.999) { 'owned' } elseif ($bestScore -ge $Threshold) { 'maybe' } else { 'notowned' }
     [pscustomobject]@{
       Code = $w.Code; Url = $w.Url; Title = $(if ($w.Title) { $w.Title } else { '(タイトル不明)' })
       Status = $status; Score = [Math]::Round($bestScore, 2); How = $how
       Match = $(if ($best -and $status -ne 'notowned') { $best.Name } else { '' })
       MatchPath = $(if ($best -and $status -ne 'notowned') { $best.Path } else { '' })
+      # 「持っていない」でも 0.4 以上なら参考に「いちばん近い」を出す（判定の厳しさを下げるかの目安。最小 0.3 より少し上）
       NearName = $(if ($best -and $status -eq 'notowned' -and $bestScore -ge 0.4) { $best.Name } else { '' })
     }
   }
@@ -355,16 +357,26 @@ function Remove-BookmarksByCode([string]$Path, [string[]]$Codes, [string]$Backup
   $result = @{ Removed = $removed.ToArray(); Backup = $null }
   if ($DryRun -or $removed.Count -eq 0) { return $result }
 
-  New-Item -ItemType Directory -Force $BackupDir | Out-Null
-  $tag = if ($full -match '\\Microsoft\\Edge\\') { 'Edge' } elseif ($full -match '\\Google\\Chrome\\') { 'Chrome' } else { 'Other' }
-  $bk = Join-Path $BackupDir ("Bookmarks-{0}-{1}" -f $tag, (Get-Date -Format 'yyyyMMdd-HHmmss'))
-  Copy-Item -LiteralPath $full -Destination $bk
-  $result.Backup = $bk
-
-  # checksum は中身が変わると合わなくなるので外す（ブラウザが次回起動時に作り直す）
-  $json.PSObject.Properties.Remove('checksum')
-  [IO.File]::WriteAllText($full, ($json | ConvertTo-Json -Depth 100), (New-Object Text.UTF8Encoding $false))
+  $result.Backup = Backup-BookmarksFile $full $BackupDir
+  Save-BookmarksJson $full $json
   return $result
+}
+
+# Bookmarks ファイルをバックアップのフォルダにコピーし、そのパスを返す。
+# 名前は「Bookmarks-<Chrome/Edge/Other または $Tag>-<日時>」
+function Backup-BookmarksFile([string]$Path, [string]$BackupDir, [string]$Tag) {
+  New-Item -ItemType Directory -Force $BackupDir | Out-Null
+  if (-not $Tag) { $Tag = if ($Path -match '\\Microsoft\\Edge\\') { 'Edge' } elseif ($Path -match '\\Google\\Chrome\\') { 'Chrome' } else { 'Other' } }
+  $bk = Join-Path $BackupDir ("Bookmarks-{0}-{1}" -f $Tag, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+  Copy-Item -LiteralPath $Path -Destination $bk
+  return $bk
+}
+
+# 書き換えた Bookmarks を保存する。
+# checksum は中身が変わると合わなくなるので外す（ブラウザが次回起動時に作り直す）
+function Save-BookmarksJson([string]$Path, $Json) {
+  $Json.PSObject.Properties.Remove('checksum')
+  [IO.File]::WriteAllText($Path, ($Json | ConvertTo-Json -Depth 100), (New-Object Text.UTF8Encoding $false))
 }
 
 # ---------- 6. まとめて追加 ----------
@@ -379,9 +391,11 @@ function Read-WishlistFromText([string]$Text) {
 }
 
 # DLsite から作品名を取ってくる（送るのは RJ 番号だけ）。戻り値: @{ RJ番号 = 作品名 }
+# 通信に失敗した RJ 番号の数は $script:DLsiteFailedCount に、最後のエラーは $script:DLsiteLastError に入れる
 function Get-DLsiteTitles([string[]]$Codes) {
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
   $titles = @{}
+  $script:DLsiteFailedCount = 0; $script:DLsiteLastError = ''
   $list = @($Codes | Select-Object -Unique)
   for ($i = 0; $i -lt $list.Count; $i += 30) {
     $chunk = $list[$i..([Math]::Min($i + 29, $list.Count - 1))]
@@ -392,7 +406,10 @@ function Get-DLsiteTitles([string[]]$Codes) {
       $res.RawContentStream.Position = 0; $res.RawContentStream.CopyTo($ms)
       $json = [Text.Encoding]::UTF8.GetString($ms.ToArray()) | ConvertFrom-Json
       foreach ($p in $json.PSObject.Properties) { if ($p.Value.work_name) { $titles[$p.Name.ToUpperInvariant()] = [string]$p.Value.work_name } }
-    } catch { }
+    } catch {
+      $script:DLsiteFailedCount += @($chunk).Count
+      $script:DLsiteLastError = $_.Exception.Message
+    }
     if ($i + 30 -lt $list.Count) { Start-Sleep -Milliseconds 800 }
   }
   return $titles
@@ -415,11 +432,12 @@ function Add-BookmarksToFolder([string]$Path, [string]$Folder, $Items, [string]$
 
   # すでにフォルダ（サブフォルダ含む）にある RJ 番号と、全体で使われている最大の id を調べる
   $have = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-  $script:maxId = 0
+  # 最大の id は、入れ子の scriptblock から書き換えられるようハッシュテーブルに入れる（呼び出し元の変数を汚さない）
+  $ids = @{ Max = [long]0 }
   $scan = {
     param($node, [bool]$inTarget)
     foreach ($c in @($node.children)) {
-      $n = 0; if ([long]::TryParse("$($c.id)", [ref]$n) -and $n -gt $script:maxId) { $script:maxId = $n }
+      $n = 0; if ([long]::TryParse("$($c.id)", [ref]$n) -and $n -gt $ids.Max) { $ids.Max = $n }
       $inside = $inTarget -or ($c.type -eq 'folder' -and "$($c.id)" -eq "$($target.id)")
       if ($inside -and $c.type -eq 'url' -and $c.url -match $script:CodeRe) { [void]$have.Add($Matches[1]) }
       if ($c.type -eq 'folder') { & $scan $c $inside }
@@ -427,7 +445,7 @@ function Add-BookmarksToFolder([string]$Path, [string]$Folder, $Items, [string]$
   }
   foreach ($r in $json.roots.PSObject.Properties) {
     if ($r.Value -is [pscustomobject]) {
-      $n = 0; if ([long]::TryParse("$($r.Value.id)", [ref]$n) -and $n -gt $script:maxId) { $script:maxId = $n }
+      $n = 0; if ([long]::TryParse("$($r.Value.id)", [ref]$n) -and $n -gt $ids.Max) { $ids.Max = $n }
       & $scan $r.Value $false
     }
   }
@@ -439,11 +457,11 @@ function Add-BookmarksToFolder([string]$Path, [string]$Folder, $Items, [string]$
   foreach ($it in $Items) {
     if ($have.Contains($it.Code)) { $skipped++; continue }
     [void]$have.Add($it.Code)
-    $script:maxId++
+    $ids.Max++
     $name = if ($it.Title -and $it.Title -ne '(タイトル不明)') { $it.Title } else { $it.Code }
     $newNodes.Add([pscustomobject][ordered]@{
       date_added = $now; date_last_used = '0'; guid = [guid]::NewGuid().ToString()
-      id = [string]$script:maxId; name = $name; type = 'url'; url = $it.Url
+      id = [string]$ids.Max; name = $name; type = 'url'; url = $it.Url
     })
     $added.Add($name)
   }
@@ -451,14 +469,8 @@ function Add-BookmarksToFolder([string]$Path, [string]$Folder, $Items, [string]$
   $result = @{ Added = $added.ToArray(); Skipped = $skipped; Backup = $null }
   if ($DryRun -or $added.Count -eq 0) { return $result }
 
-  New-Item -ItemType Directory -Force $BackupDir | Out-Null
-  $tag = if ($full -match '\\Microsoft\\Edge\\') { 'Edge' } elseif ($full -match '\\Google\\Chrome\\') { 'Chrome' } else { 'Other' }
-  $bk = Join-Path $BackupDir ("Bookmarks-{0}-{1}" -f $tag, (Get-Date -Format 'yyyyMMdd-HHmmss'))
-  Copy-Item -LiteralPath $full -Destination $bk
-  $result.Backup = $bk
-
+  $result.Backup = Backup-BookmarksFile $full $BackupDir
   $target.children = @(@($target.children) + $newNodes.ToArray() | Where-Object { $null -ne $_ })
-  $json.PSObject.Properties.Remove('checksum')
-  [IO.File]::WriteAllText($full, ($json | ConvertTo-Json -Depth 100), (New-Object Text.UTF8Encoding $false))
+  Save-BookmarksJson $full $json
   return $result
 }

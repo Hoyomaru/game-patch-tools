@@ -2,7 +2,7 @@
   check-owned.ps1  —  所持チェックのコマンド版（普段は GUI 版「所持チェック.bat」を使ってください）
 
   気になるリストとゲームフォルダを照らし合わせて「もう持っているか」を判定します。
-  すべてこのPCの中だけで処理します。ネットにアクセスするのは「URL をまとめて追加」で作品名を DLsite から取るときだけです（送るのは RJ 番号だけ）。
+  すべてこのPCの中だけで処理します。コマンド版はネットにアクセスしません。
 
   使い方（例）:
     .\check-owned.ps1 -Export "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Bookmarks" -GameDirs "E:\Games"
@@ -18,6 +18,9 @@
     -Prune      Bookmarks ファイルから「持っている」作品を削除（ブラウザ終了中のみ・バックアップあり）
     -SkipMaybe  「たぶん持っている」は確認せず残す
     -DryRun     実際には消さず、消す予定のものを表示するだけ
+    -BookmarkFolder  Bookmarks ファイルのうち、このフォルダの中（サブフォルダ含む）だけを読む・消す。
+                     GUI の「ブックマークのフォルダ」と同じ書き方（例: "ブックマーク バー / DLsite気になる"）
+    -SkipBrowserCheck  テスト用。ブラウザが起動中でも消す（通常は使わないでください）
 #>
 [CmdletBinding()]
 param(

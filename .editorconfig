@@ -1,0 +1,16 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+
+# PowerShell 5.1 は BOM のない ps1 を CP932 として読み、日本語が化けるので BOM 付きにする
+[*.ps1]
+charset = utf-8-bom
+indent_style = space
+indent_size = 2
+
+[*.{js,md}]
+indent_style = space
+indent_size = 2

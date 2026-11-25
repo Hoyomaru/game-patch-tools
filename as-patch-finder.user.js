@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.5.1
+// @version      1.5.2
 // @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
 // @updateURL    https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
@@ -211,6 +211,26 @@
     const latestChanged = !!b && (!a || a.url !== b.url || verLabel(a) !== verLabel(b));
     if (!newCount && !latestChanged) return null;
     return { newCount, latestChanged, from: a ? verLabel(a) : '', to: verLabel(b) };
+  }
+
+  // まだ消していない前回の印（older）に、今回の違い（newer）を足す。
+  // 印を見る前に検索し直しても、印が消えたり「新着」の数が減ったりしないように。
+  function mergeChanges(older, newer) {
+    if (!older) return newer || null;
+    if (!newer) return older;
+    return {
+      newCount: older.newCount + newer.newCount,
+      latestChanged: older.latestChanged || newer.latestChanged,
+      from: older.latestChanged ? older.from : newer.from,
+      to: newer.to,
+    };
+  }
+
+  // 長いタイトルは「… [RJ01...」のように途中で切れて表示されるので、切れた先頭部分が一致すれば同じ作品とみなす。
+  // ただし「RJ01」だけでは最近の作品ほぼすべてに当てはまるので、RJ と数字6桁以上が残っているときだけにする
+  function cutCode(title, code) {
+    const m = title.match(/((?:RJ|VJ|BJ|RE)\d*)(?:\.\.\.|…)$/i);
+    return !!m && m[1].length >= 8 && code.startsWith(m[1].toUpperCase());
   }
 
   // 作品名検索用のキーワード：【】[]() などの添え書きと記号を外し、長すぎれば前の方だけ使う
@@ -550,12 +570,6 @@
     return doc;
   }
 
-  // 長いタイトルは「… [RJ01...」のように途中で切れて表示されるので、切れた先頭部分が一致すれば同じ作品とみなす
-  function cutCode(title, code) {
-    const m = title.match(/((?:RJ|VJ|BJ|RE)\d*)(?:\.\.\.|…)$/i);
-    return !!m && m[1].length >= 4 && code.startsWith(m[1].toUpperCase());
-  }
-
   function parseResultRows(doc, code, into) {
     for (const li of doc.querySelectorAll(`${LIST_SEL} > ${ROW_SEL}`)) {
       const a = li.querySelector('.contentRow-title a');
@@ -635,8 +649,8 @@
           break;
         }
         autoMsg(`${code} を検索中…`);
+        const prev = auto.results[code];
         try {
-          const prev = auto.results[code];
           const threads = await searchCode(code);
           // RJ番号の入ったスレッドが無ければ、作品名でも探す
           const kw = auto.useTitles && !threads.some(t => t.hasCode) ? titleKeyword(auto.titles[code]) : '';
@@ -646,7 +660,7 @@
             autoMsg(`${code} を作品名でも検索中…`);
             threads.push(...await searchTitle(kw, code, threads));
           }
-          const changes = diffResults(prev, threads);
+          const changes = mergeChanges(prev?.changes, diffResults(prev, threads));
           auto.results[code] = Object.assign({ at: Date.now(), threads }, kw ? { keyword: kw } : {}, changes ? { changes } : {});
           floods = 0;
         } catch (e) {
@@ -658,7 +672,9 @@
             await wait((e.sec + 5) * 1000 * floods, '検索が多すぎるとASに言われたので待っています');
             continue;
           }
-          auto.results[code] = { at: Date.now(), threads: [], error: String(e.message || e) };
+          // エラーでも、まだ消していない新着・更新の印は残す
+          auto.results[code] = Object.assign({ at: Date.now(), threads: [], error: String(e.message || e) },
+            prev?.changes ? { changes: prev.changes } : {});
           if (/HTTP 40[13]/.test(auto.results[code].error)) {
             saveAuto();
             autoMsg('ASに断られました（' + auto.results[code].error + '）。このページを開き直して、普通に見られるか確かめてから再開してください。');
@@ -712,7 +728,7 @@
     const rows = [TSV_HEAD, ...exportRows(false)];
     const tsv = rows.map(r => r.map(x => String(x).replace(/[\t\r\n]+/g, ' ')).join('\t')).join('\r\n');
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob(['﻿' + tsv], { type: 'text/tab-separated-values' }));
+    a.href = URL.createObjectURL(new Blob(['\uFEFF' + tsv], { type: 'text/tab-separated-values' }));
     const d = new Date();
     a.download = `as-search-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.tsv`;
     document.body.appendChild(a); a.click(); a.remove();

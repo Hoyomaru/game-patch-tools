@@ -13,7 +13,7 @@ const start = src.indexOf('// ---------- 解析 ----------');
 const end = src.indexOf('// ---------- 表示 ----------');
 assert.ok(start >= 0 && end > start, '解析／表示の印が見つかりません');
 const apf = new Function(src.slice(start, end) +
-  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, titleKeyword, titleMatches };')();
+  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, titleKeyword, titleMatches };')();
 
 const T = (title, extra = {}) => Object.assign({ title, url: 'https://example.invalid/' + encodeURIComponent(title), hasCode: true, posted: 0, kind: 'thread' }, extra);
 const info = (title, posted = 0) => {
@@ -119,6 +119,23 @@ test('前回との違い（新着・最新の更新）', () => {
   // 同じスレッドのタイトルが書き換わってバージョンが上がった
   const d3 = apf.diffResults(prev, [T('RJ01 Game v1.2 English patch', { url: prev.threads[0].url })]);
   assert.deepEqual(d3, { newCount: 0, latestChanged: true, from: 'v1.0', to: 'v1.2' });
+});
+
+test('まだ消していない印は、検索し直しても残る', () => {
+  const old = { newCount: 1, latestChanged: true, from: 'v1.0', to: 'v1.1' };
+  assert.deepEqual(apf.mergeChanges(old, null), old);                 // 今回は変化なし → 前の印のまま
+  assert.equal(apf.mergeChanges(null, null), null);
+  const now = { newCount: 2, latestChanged: true, from: 'v1.1', to: 'v1.2' };
+  assert.deepEqual(apf.mergeChanges(old, now), { newCount: 3, latestChanged: true, from: 'v1.0', to: 'v1.2' });
+  const onlyNew = { newCount: 1, latestChanged: false, from: 'v1.0', to: 'v1.0' };
+  assert.deepEqual(apf.mergeChanges(onlyNew, now), { newCount: 3, latestChanged: true, from: 'v1.1', to: 'v1.2' });
+});
+
+test('途中で切れたタイトルのコード', () => {
+  assert.ok(apf.cutCode('Some long title [RJ012345...', 'RJ01234567'));
+  assert.ok(apf.cutCode('Some long title [RJ012345…', 'RJ01234567'));
+  assert.ok(!apf.cutCode('Some long title [RJ01...', 'RJ01234567'));   // RJ01 だけでは決めない
+  assert.ok(!apf.cutCode('Some long title [RJ012399...', 'RJ01234567'));
 });
 
 test('作品名検索のキーワード', () => {
