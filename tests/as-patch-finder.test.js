@@ -13,7 +13,7 @@ const start = src.indexOf('// ---------- 解析 ----------');
 const end = src.indexOf('// ---------- 表示 ----------');
 assert.ok(start >= 0 && end > start, '解析／表示の印が見つかりません');
 const apf = new Function(src.slice(start, end) +
-  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, titleKeyword, titleMatches };')();
+  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, orphanCodes, titleKeyword, titleMatches };')();
 
 const T = (title, extra = {}) => Object.assign({ title, url: 'https://example.invalid/' + encodeURIComponent(title), hasCode: true, posted: 0, kind: 'thread' }, extra);
 const info = (title, posted = 0) => {
@@ -136,6 +136,13 @@ test('途中で切れたタイトルのコード', () => {
   assert.ok(apf.cutCode('Some long title [RJ012345…', 'RJ01234567'));
   assert.ok(!apf.cutCode('Some long title [RJ01...', 'RJ01234567'));   // RJ01 だけでは決めない
   assert.ok(!apf.cutCode('Some long title [RJ012399...', 'RJ01234567'));
+});
+
+test('今のリストにない作品の結果', () => {
+  const results = { RJ01000001: {}, RJ01000002: {}, RJ01000003: {} };
+  const titles = { RJ01000002: 'b', RJ01000004: 'd' };
+  assert.deepEqual(apf.orphanCodes(results, ['RJ01000002', 'RJ01000003'], titles).sort(), ['RJ01000001', 'RJ01000004']);
+  assert.deepEqual(apf.orphanCodes(results, Object.keys(results)), []);
 });
 
 test('作品名検索のキーワード', () => {

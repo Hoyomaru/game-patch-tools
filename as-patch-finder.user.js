@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.5.2
+// @version      1.5.3
 // @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
 // @updateURL    https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
@@ -224,6 +224,13 @@
       from: older.latestChanged ? older.from : newer.from,
       to: newer.to,
     };
+  }
+
+  // 今の検索対象（queue）に入っていない作品のコード。検索結果か作品名が保存されているもの。
+  // リストを入れ替えても前の結果は残るので、ブラウザの保存領域に溜まりすぎたときに消せるようにする
+  function orphanCodes(results, queue, titles = {}) {
+    const inQueue = new Set(queue);
+    return [...new Set([...Object.keys(results), ...Object.keys(titles)])].filter(c => !inQueue.has(c));
   }
 
   // 長いタイトルは「… [RJ01...」のように途中で切れて表示されるので、切れた先頭部分が一致すれば同じ作品とみなす。
@@ -683,7 +690,7 @@
         }
         tried.add(code);   // 「多すぎる」で待った作品はここに来ないので、もう一度検索される
         saveAuto();
-        renderPanel();
+        refreshPanel();
         if (nextCode()) await wait(auto.interval * 1000, '次の検索まで待機中');
       }
     } finally {
@@ -782,17 +789,45 @@
     if (m) m.textContent = t;
   }
 
-  function renderPanel() {
-    if (!panel) return;
+  // 件数の集計（パネルの見出しと、検索中の部分更新で使う）
+  function panelStats() {
     const total = auto.queue.length;
     const left = pending().length;
-    const done = total - left;
-    const found = auto.queue.filter(c => auto.results[c]?.threads.length).length;
-    const urls = auto.queue.reduce((n, c) => n + (auto.results[c]?.threads.length || 0), 0);
-    const errors = auto.queue.filter(c => auto.results[c]?.error).length;
-    const changed = auto.queue.filter(c => auto.results[c]?.changes).length;
+    return {
+      total, left, done: total - left,
+      found: auto.queue.filter(c => auto.results[c]?.threads.length).length,
+      urls: auto.queue.reduce((n, c) => n + (auto.results[c]?.threads.length || 0), 0),
+      errors: auto.queue.filter(c => auto.results[c]?.error).length,
+      changed: auto.queue.filter(c => auto.results[c]?.changes).length,
+      etaMin: Math.ceil(left * (auto.interval + 1.5) / 60),
+    };
+  }
+  const summaryText = s =>
+    `対象 ${s.total}件 ／ 検索済み ${s.done}件 ／ 見つかった作品 ${s.found}件（スレッド ${s.urls}件）` +
+    (s.changed ? ` ／ 新着・更新あり ${s.changed}件` : '') +
+    (s.errors ? ` ／ エラー ${s.errors}件` : '') + (s.left ? ` ／ 残り ${s.left}件（約${s.etaMin}分）` : '');
+  const progWidth = s => `${s.total ? (s.done / s.total) * 100 : 0}%`;
+
+  // 検索中は、件数・進み具合・結果の表だけを差し替える。
+  // パネル全体を作り直すと、開いていた貼り付け欄が閉じたり、入力中の欄からフォーカスが外れたりするため
+  function refreshPanel() {
+    const sum = panel?.querySelector('.apf-sum');
+    if (!sum) { renderPanel(); return; }
+    const s = panelStats();
+    sum.textContent = summaryText(s);
+    panel.querySelector('.apf-prog > div').style.width = progWidth(s);
+    panel.querySelector('.apf-res').replaceChildren(resultTable());
+  }
+
+  // 貼り付け欄の開閉と、入力中の文字（パネルを作り直しても消えないように覚えておく）
+  let pasteOpen = false, pasteText = '';
+
+  function renderPanel() {
+    if (!panel) return;
+    const s = panelStats();
+    const { total, left, done, changed } = s;
     const titleCount = auto.queue.filter(c => auto.titles[c]).length;
-    const etaMin = Math.ceil(left * (auto.interval + 1.5) / 60);
+    const orphans = orphanCodes(auto.results, auto.queue, auto.titles);
 
     const startBtn = running
       ? el('button', { type: 'button', onclick: () => { stopReq = true; autoMsg('止めています…'); } }, '一時停止')
@@ -805,17 +840,21 @@
         if (v >= min && v <= max) { auto[key] = v; saveAuto(); }
       } }), unit);
 
-    const paste = el('div', { style: 'display:none' },
+    const ta = el('textarea', { oninput: e => { pasteText = e.target.value; } });
+    ta.value = pasteText;
+    const paste = el('div', { style: pasteOpen ? '' : 'display:none' },
       el('div', {}, 'RJ番号を貼り付けてください（ほかの文字が混ざっていてもOK）。検索対象がこのリストに置き換わります。前回までの検索結果は残ります。' +
         '「RJ番号 [タブ] 作品名」の行なら作品名も読み込み、RJ番号で見つからないときに作品名でも検索します（所持チェックの「ASで検索」がこの形でコピーします）。'),
-      el('textarea', {}),
+      ta,
       el('div', { class: 'apf-row' },
-        el('button', { type: 'button', onclick: e => {
-          const text = e.target.closest('div').previousElementSibling.value;
+        el('button', { type: 'button', onclick: () => {
+          const text = ta.value;
           const codes = importCodes(text);
           if (!codes.length) { autoMsg('RJ番号が見つかりませんでした。'); return; }
+          if (running) { autoMsg('止めてから入れ替えてください。'); return; }
           const titles = importTitles(text);
           Object.assign(auto.titles, titles);
+          pasteOpen = false; pasteText = '';
           setQueue(codes);
           const n = Object.keys(titles).length;
           if (n) autoMsg(`${msgText}（作品名 ${n}件も読み込みました）`);
@@ -827,16 +866,13 @@
 
     panel.replaceChildren(
       el('h3', {}, '自動検索（作品コードで順番に検索）'),
-      el('div', { class: 'apf-row' },
-        `対象 ${total}件 ／ 検索済み ${done}件 ／ 見つかった作品 ${found}件（スレッド ${urls}件）` +
-        (changed ? ` ／ 新着・更新あり ${changed}件` : '') +
-        (errors ? ` ／ エラー ${errors}件` : '') + (left ? ` ／ 残り ${left}件（約${etaMin}分）` : '')),
-      el('div', { class: 'apf-prog' }, el('div', { style: `width:${total ? (done / total) * 100 : 0}%` })),
+      el('div', { class: 'apf-row apf-sum' }, summaryText(s)),
+      el('div', { class: 'apf-prog' }, el('div', { style: `width:${progWidth(s)}` })),
       el('div', { class: 'apf-row' },
         startBtn,
         num('interval', 3, 60, '間隔', '秒'),
         num('staleDays', 0, 365, '', '日以内に検索した作品は飛ばす'),
-        el('button', { type: 'button', onclick: () => { paste.style.display = paste.style.display ? '' : 'none'; } }, 'RJ番号を貼り付け…')),
+        el('button', { type: 'button', onclick: () => { pasteOpen = !pasteOpen; paste.style.display = pasteOpen ? '' : 'none'; } }, 'RJ番号を貼り付け…')),
       el('div', { class: 'apf-row' },
         el('label', {},
           el('input', { type: 'checkbox', ...(auto.useTitles ? { checked: '' } : {}),
@@ -856,9 +892,15 @@
           for (const c of auto.queue) if (auto.results[c]) delete auto.results[c].changes;
           saveAuto(); renderPanel();
         } }, '新着・更新の印を消す') : null,
+        orphans.length ? el('button', { type: 'button', onclick: () => {
+          if (running) { autoMsg('止めてから押してください。'); return; }
+          if (!confirm(`今の検索対象に入っていない ${orphans.length}件の検索結果と作品名を消します。よろしいですか？`)) return;
+          for (const c of orphans) { delete auto.results[c]; delete auto.titles[c]; }
+          saveAuto(); autoMsg(`${orphans.length}件の古い結果を消しました。`); renderPanel();
+        } }, `今のリストにない作品の結果を消す（${orphans.length}件）`) : null,
         el('label', {}, '表示 ', view)),
       el('div', { class: 'apf-msg' }, msgText),
-      resultTable());
+      el('div', { class: 'apf-res' }, resultTable()));
   }
 
   function resultTable() {

@@ -1,10 +1,5 @@
 ﻿# owned-gui.ps1 — 所持チェック（GUI 版）。「所持チェック.bat」をダブルクリックで起動します。
 # すべてこのPCの中だけで処理します。ネットにアクセスするのは「URL をまとめて追加」で作品名を DLsite から取るときだけです（送るのは RJ 番号だけ）。
-param(
-  [string]$SelfTestShot,      # テスト用：画面を画像に保存して終了する
-  [string]$SelfTestBulkShot   # テスト用：「URL をまとめて追加」の画面を開いて画像に保存する
-)
-
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'owned-core.ps1')
 
@@ -296,7 +291,24 @@ $StatusColor = @{
   notowned = [System.Drawing.SystemColors]::Window
 }
 
-function Run-Check {
+# ゲームフォルダの候補を集める。「チェック開始」では毎回調べ直す。
+# 削除のあとと「まとめて追加」は、同じフォルダ・同じ深さで調べた結果があればそれを使う（フォルダを調べ直すのは時間がかかるため）
+$script:CandCache = $null
+function Get-Candidates([switch]$Reuse) {
+  $dirs = @($gd.List.Items | ForEach-Object { "$_" })
+  $depth = [int]$numDepth.Value
+  $key = ($dirs -join '|') + "|$depth"
+  if ($Reuse -and $script:CandCache -and $script:CandCache.Key -eq $key) {
+    $script:MissingGameDirs = $script:CandCache.Missing
+    return ,$script:CandCache.Cands
+  }
+  $c = Get-GameCandidates $dirs $depth
+  $script:CandCache = @{ Key = $key; Cands = $c; Missing = @($script:MissingGameDirs) }
+  return ,$c
+}
+
+# -ReuseCandidates: ゲームフォルダは調べ直さず、前回の候補で照らし合わせ直す（ブックマークを消したあと用）
+function Run-Check([switch]$ReuseCandidates) {
   $sources = @($src.List.Items | ForEach-Object { "$_" })
   $dirs = @($gd.List.Items | ForEach-Object { "$_" })
   if ($sources.Count -eq 0) { Show-Info '① の「気になるリスト」を追加してください。'; return }
@@ -313,8 +325,8 @@ function Run-Check {
       Show-Info ("気になるリストの中に DLsite の作品URL（RJ番号入り）が見つかりませんでした。" + $hint)
       return
     }
-    $lblStatus.Text = 'ゲームフォルダを調べています…'; $form.Refresh()
-    $cands = Get-GameCandidates $dirs ([int]$numDepth.Value)
+    if (-not $ReuseCandidates) { $lblStatus.Text = 'ゲームフォルダを調べています…'; $form.Refresh() }
+    $cands = Get-Candidates -Reuse:$ReuseCandidates
     $lblStatus.Text = '照らし合わせています…'; $form.Refresh()
     $script:Results = @(Compare-Owned $wish $cands ([double]$numTh.Value))
     Write-OwnedReport $script:Results $wish.Count $cands.Count ([double]$numTh.Value) $ReportPath
@@ -329,7 +341,8 @@ function Run-Check {
     $missing = @($script:MissingGameDirs)
     if ($missing.Count) {
       $lblStatus.Text += " ／ 見つからないゲームフォルダ $($missing.Count) か所を飛ばしました"
-      Show-Info ("次のゲームフォルダが見つからなかったので、飛ばして判定しました。`n（ドライブがつながっているか確かめてください。この中の作品は「持っていない」になっています）`n`n" + ($missing -join "`n"))
+      # 削除のあとの照らし合わせ直しでは、同じ知らせを2回出さない
+      if (-not $ReuseCandidates) { Show-Info ("次のゲームフォルダが見つからなかったので、飛ばして判定しました。`n（ドライブがつながっているか確かめてください。この中の作品は「持っていない」になっています）`n`n" + ($missing -join "`n")) }
     }
   } finally {
     $form.Cursor = 'Default'; $btnRun.Enabled = $true
@@ -473,7 +486,7 @@ function Invoke-BulkAdd([string]$text, [string]$target, [string]$folder, [bool]$
     $ownedN = 0
     $dirs = @($gd.List.Items | ForEach-Object { "$_" })
     if ($skipOwned -and $dirs.Count) {
-      $cands = Get-GameCandidates $dirs ([int]$numDepth.Value)
+      $cands = Get-Candidates -Reuse
       $owned = @{}
       Compare-Owned $items $cands ([double]$numTh.Value) | Where-Object Status -eq 'owned' | ForEach-Object { $owned[$_.Code] = 1 }
       $ownedN = $owned.Count
@@ -541,7 +554,8 @@ function Delete-Checked {
     $report.Add("・$bf`n  → $($r.Removed.Count) 件消しました（バックアップ: $(Split-Path $r.Backup -Leaf)）")
   }
   Show-Info ($report -join "`n`n") '削除の結果'
-  Run-Check
+  # ブックマークだけ読み直す。ゲームフォルダは変わっていないので、前回の候補を使う
+  Run-Check -ReuseCandidates
 }
 
 function Restore-Backup {
@@ -602,33 +616,4 @@ $numTh.Add_ValueChanged({ Save-Settings })
 
 # ---------- 起動 ----------
 
-if ($SelfTestShot) {
-  # テスト用：画面を表示せずに描画して画像に保存
-  $form.ShowInTaskbar = $false; $form.Opacity = 0
-  $form.Add_Shown({
-    try { Run-Check } catch { }
-    $bmp = New-Object System.Drawing.Bitmap($form.Width, $form.Height)
-    $form.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $form.Width, $form.Height)))
-    $bmp.Save($SelfTestShot)
-    if ($SelfTestBulkShot) {
-      # 実際のボタンを押して開き、開いたダイアログを撮って閉じる
-      $timer = New-Object System.Windows.Forms.Timer
-      $timer.Interval = 800
-      $timer.Add_Tick({
-        $timer.Stop()
-        $dlgOpen = [System.Windows.Forms.Application]::OpenForms | Where-Object { $_.Text -like 'URL をまとめて追加*' } | Select-Object -First 1
-        if ($dlgOpen) {
-          $b2 = New-Object System.Drawing.Bitmap($dlgOpen.Width, $dlgOpen.Height)
-          $dlgOpen.DrawToBitmap($b2, (New-Object System.Drawing.Rectangle(0, 0, $dlgOpen.Width, $dlgOpen.Height)))
-          $b2.Save($SelfTestBulkShot)
-          $dlgOpen.Close()
-        }
-      })
-      $timer.Start()
-      $btnBulk = $src.Buttons.Controls | Where-Object { $_.Text -eq 'URL をまとめて追加…' }
-      $btnBulk.PerformClick()
-    }
-    $form.Close()
-  })
-}
 [void]$form.ShowDialog()
