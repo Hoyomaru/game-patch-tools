@@ -12,6 +12,19 @@
 - ネットにアクセスするのは「URL をまとめて追加」で作品名をDLsiteから取るときだけです（送るのはRJ番号だけ）
 - 「持っていない作品をASで検索」で、持っていない作品のRJ番号を付けてASの検索ページをブラウザで開きます（検索そのものは下の AS Patch Finder が行います）
 
+### 入手
+
+- **git を使う場合**：`git clone https://github.com/Hoyomaru/game-patch-tools.git`。更新は `git pull`
+- **git を使わない場合**：GitHub の「Code」→「Download ZIP」で最新版を、「Tags」から版を選べばその版の ZIP を取れます（リリースを作らなくても、タグごとに ZIP があります）
+  - 展開する前に、ZIP を右クリック →「プロパティ」→「許可する」にチェックを入れます。入れないと、起動するたびにセキュリティの警告が出ることがあります
+  - 更新するときは、新しいファイルで上書きします。`owned-gui-settings.json` と `bookmark-backups` は ZIP に入っていないので、そのまま残ります
+
+黒いウィンドウを出さずに起動したいときは、デスクトップなどに次のショートカットを作ります（パスは置いた場所に合わせる）。
+
+```
+C:\Windows\System32\conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "<置いた場所>\owned-gui.ps1"
+```
+
 ### 使い方
 
 1. **① 気になるリスト**：「ブラウザのブックマークを追加 ▼」で Chrome / Edge のブックマークを選び、「ブックマークのフォルダ」で DLsite の作品を入れているフォルダを選びます（初回は見つかったブックマークが最初から入っています）。Session Buddy のエクスポートなどは「ファイルを追加…」から
@@ -76,3 +89,7 @@ node --test tests/
 ## 編集するとき
 
 PowerShell 5.1 は BOM のない ps1 を日本語の文字コード（CP932）として読むので、`*.ps1` は **UTF-8（BOM付き）** で保存します。`.editorconfig` と `.gitattributes` で、文字コードと改行（CRLF）をそろえています。
+
+## ライセンス
+
+MIT License（[LICENSE](LICENSE)）
