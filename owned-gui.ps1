@@ -326,6 +326,11 @@ function Run-Check {
     $m = @($script:Results | Where-Object Status -eq 'maybe').Count
     $n = @($script:Results | Where-Object Status -eq 'notowned').Count
     $lblStatus.Text = "気になるリスト $($wish.Count) 作品 ／ 手元 $($cands.Count) 件 → 持っている $o ・ たぶん $m ・ 持っていない $n"
+    $missing = @($script:MissingGameDirs)
+    if ($missing.Count) {
+      $lblStatus.Text += " ／ 見つからないゲームフォルダ $($missing.Count) か所を飛ばしました"
+      Show-Info ("次のゲームフォルダが見つからなかったので、飛ばして判定しました。`n（ドライブがつながっているか確かめてください。この中の作品は「持っていない」になっています）`n`n" + ($missing -join "`n"))
+    }
   } finally {
     $form.Cursor = 'Default'; $btnRun.Enabled = $true
   }
@@ -471,6 +476,9 @@ function Invoke-BulkAdd([string]$text, [string]$target, [string]$folder, [bool]$
   if ($plan.Skipped) { $msg += "`n・フォルダにすでにある $($plan.Skipped) 作品は追加しません" }
   if ($ownedN) { $msg += "`n・すでに持っている $ownedN 作品は追加しません" }
   if ($noTitle) { $msg += "`n・作品名がわからない $noTitle 作品は、RJ番号を名前にして追加します" }
+  if ($skipOwned -and $dirs.Count -and @($script:MissingGameDirs).Count) {
+    $msg += "`n・見つからないゲームフォルダ $(@($script:MissingGameDirs).Count) か所は飛ばしました（その中の作品は「持っている」と判定されません）"
+  }
   if ($plan.Added.Count -eq 0) { Show-Info ($msg -replace '^.*?。', '追加するものはありません。'); return $true }
   if (-not (Ask-YesNo ($msg + "`n`n追加の前にバックアップを取ります。よろしいですか？") '追加の確認')) { return $false }
   if (-not (Wait-BrowserClosed $target)) { return $false }
@@ -560,20 +568,25 @@ function Load-Settings {
       $o = Get-Content -LiteralPath $SettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       foreach ($p in @($o.Sources)) { if ($p) { [void]$src.List.Items.Add($p) } }
       foreach ($p in @($o.GameDirs)) { if ($p) { [void]$gd.List.Items.Add($p) } }
-      if ($o.Depth) { $numDepth.Value = [decimal]$o.Depth }
-      if ($o.Threshold) { $numTh.Value = [decimal]$o.Threshold }
+      # 手で書き換えて範囲外になっていても止まらないよう、範囲内に収めてから入れる
+      if ($o.Depth) { $numDepth.Value = [Math]::Max($numDepth.Minimum, [Math]::Min($numDepth.Maximum, [decimal]$o.Depth)) }
+      if ($o.Threshold) { $numTh.Value = [Math]::Max($numTh.Minimum, [Math]::Min($numTh.Maximum, [decimal]$o.Threshold)) }
       Refresh-Folders ([string]$o.BookmarkFolder)
       return
-    } catch { }
+    } catch {
+      # 設定ファイルが壊れていたら、途中まで入れたものを消して初回と同じにする（重複させない）
+      $src.List.Items.Clear(); $gd.List.Items.Clear()
+    }
   }
   # 初回：見つかったブラウザのブックマークを最初から入れておく
   foreach ($f in @(Find-BrowserBookmarks | Select-Object -First 1)) { [void]$src.List.Items.Add($f.Path) }
   Refresh-Folders
 }
 
+# 読み込みが先。逆にすると、読み込みの途中（フォルダ未設定のとき）に保存が走り、フォルダ指定が消える
+Load-Settings
 $numDepth.Add_ValueChanged({ Save-Settings })
 $numTh.Add_ValueChanged({ Save-Settings })
-Load-Settings
 
 # ---------- 起動 ----------
 

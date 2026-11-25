@@ -40,6 +40,7 @@ $ErrorActionPreference = 'Stop'
 $wish = @(Read-Wishlist $Export $BookmarkFolder)
 if ($wish.Count -eq 0) { Write-Warning 'DLsite の作品URL（RJ番号入り）が見つかりませんでした。'; return }
 $cands = Get-GameCandidates $GameDirs $Depth
+foreach ($d in @($script:MissingGameDirs)) { Write-Warning "ゲームフォルダが見つからないので飛ばしました: $d" }
 Write-Host ("気になるリスト: {0} 作品 ／ ゲームフォルダ内の候補: {1} 件" -f $wish.Count, $cands.Count)
 
 $results = @(Compare-Owned $wish $cands $Threshold)

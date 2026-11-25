@@ -26,13 +26,41 @@ function Get-Bigrams([string]$s) {
   return ,$set
 }
 
-# 2文字ずつに区切った重なり具合（0〜1）
-function Get-Similarity($bgA, $bgB) {
-  if ($bgA.Count -eq 0 -or $bgB.Count -eq 0) { return 0.0 }
-  $inter = 0
-  foreach ($x in $bgA) { if ($bgB.Contains($x)) { $inter++ } }
-  return (2.0 * $inter) / ($bgA.Count + $bgB.Count)
+# 照合の重い部分（全候補との比較）は C# で行う。PowerShell のループだと、数百×数千件で十数秒〜1分かかるため。
+# 中身は以前の PowerShell 版と同じ計算です。
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+public static class OwnedMatch {
+  // 2文字ずつに区切った重なり具合（0〜1）
+  public static double Dice(HashSet<string> a, HashSet<string> b) {
+    if (a == null || b == null || a.Count == 0 || b.Count == 0) return 0.0;
+    int n = 0;
+    foreach (var x in a) if (b.Contains(x)) n++;
+    return 2.0 * n / (a.Count + b.Count);
+  }
+  // 作品名 wn にいちばん似ている候補を探す。戻り値: { 候補の番号（なければ -1）, 似かた, 完全一致なら 1 }
+  //   完全一致 → 1.0 ですぐ返す
+  //   片方がもう片方を含む（短い方が containMin 文字以上）→ 少なくとも containScore
+  public static double[] Best(string wn, HashSet<string> wb, string[] norms, HashSet<string>[] bgs,
+                               int containMin, double containScore) {
+    int idx = -1; double best = 0.0;
+    if (string.IsNullOrEmpty(wn)) return new double[] { -1, 0, 0 };
+    for (int i = 0; i < norms.Length; i++) {
+      string cn = norms[i];
+      if (string.IsNullOrEmpty(cn)) continue;
+      if (cn == wn) return new double[] { i, 1.0, 1 };
+      double s = Dice(wb, bgs[i]);
+      if (Math.Min(wn.Length, cn.Length) >= containMin && (wn.Contains(cn) || cn.Contains(wn))) s = Math.Max(s, containScore);
+      if (s > best) { best = s; idx = i; }
+    }
+    return new double[] { idx, best, 0 };
+  }
 }
+'@
+
+# 2文字ずつに区切った重なり具合（0〜1）
+function Get-Similarity($bgA, $bgB) { [OwnedMatch]::Dice($bgA, $bgB) }
 
 # ---------- 1. 気になるリストを読む ----------
 
@@ -101,6 +129,11 @@ function Read-Wishlist([string[]]$Files, [string]$BookmarkFolder) {
 
 # ---------- 2. ゲームフォルダの中の名前を集める ----------
 
+# ゲームの中によくあるフォルダ。作品名ではないので候補にせず、中にも入らない
+# （「Game」「audio」などが作品名の一部と一致して「たぶん持っている」になるのを防ぐ）
+$script:GameInternalDirRe = '^(?:www|data|save|saves|savedata|audio|bgm|se|sound|sounds|music|movie|movies|video|img|image|images|graphics|pictures|fonts?|js|css|locales|swiftshader|system|game|lib|libs|plugins?|icons?|effects|monobleedingedge|.+_data)$'
+
+# 戻り値: 候補の一覧。見つからなかったゲームフォルダは飛ばし、$script:MissingGameDirs に入れる（全部見つからなければエラー）
 function Get-GameCandidates([string[]]$Dirs, [int]$Depth = 2) {
   $cands = New-Object System.Collections.Generic.List[object]
   $archiveExt = '.zip', '.rar', '.7z', '.lzh'
@@ -109,6 +142,7 @@ function Get-GameCandidates([string[]]$Dirs, [int]$Depth = 2) {
     if ($level -gt $Depth) { return }
     foreach ($item in Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue) {
       $isDir = $item.PSIsContainer
+      if ($isDir -and $level -gt 1 -and $item.Name -match $script:GameInternalDirRe) { continue }
       if ($isDir -or $archiveExt -contains $item.Extension.ToLowerInvariant()) {
         $name = if ($isDir) { $item.Name } else { [IO.Path]::GetFileNameWithoutExtension($item.Name) }
         $norm = Normalize-Title $name
@@ -118,9 +152,13 @@ function Get-GameCandidates([string[]]$Dirs, [int]$Depth = 2) {
       if ($isDir) { & $collect $item.FullName ($level + 1) }
     }
   }
+  # 外付けドライブのつなぎ忘れなどで1つ見つからなくても、残りは調べる
+  $script:MissingGameDirs = @($Dirs | Where-Object { -not (Test-Path -LiteralPath $_) })
+  if ($Dirs.Count -gt 0 -and $script:MissingGameDirs.Count -eq $Dirs.Count) {
+    throw "ゲームフォルダが1つも見つかりません:`n" + ($script:MissingGameDirs -join "`n")
+  }
   foreach ($d in $Dirs) {
-    if (-not (Test-Path -LiteralPath $d)) { throw "ゲームフォルダが見つかりません: $d" }
-    & $collect $d 1
+    if (Test-Path -LiteralPath $d) { & $collect $d 1 }
   }
   return ,$cands
 }
@@ -129,18 +167,29 @@ function Get-GameCandidates([string[]]$Dirs, [int]$Depth = 2) {
 
 # Status: owned（持っている）/ maybe（たぶん）/ notowned（持っていない）
 function Compare-Owned($Wishlist, $Candidates, [double]$Threshold = 0.6) {
+  # 候補を配列にしておき、作品ごとの比較は C#（OwnedMatch）に任せる
+  # @($Candidates) は New-Object で作った List だと「引数の型が一致しません」になるので、パイプラインで配列にする
+  $cl = @($Candidates | ForEach-Object { $_ })
+  $norms = [string[]]::new($cl.Count)
+  $bgs = [System.Collections.Generic.HashSet[string][]]::new($cl.Count)
+  $byCode = @{}
+  for ($i = 0; $i -lt $cl.Count; $i++) {
+    $norms[$i] = [string]$cl[$i].Norm
+    $bgs[$i] = $cl[$i].Bigrams
+    if ($cl[$i].Code -and -not $byCode.ContainsKey($cl[$i].Code)) { $byCode[$cl[$i].Code] = $cl[$i] }
+  }
   foreach ($w in $Wishlist) {
-    $wn = Normalize-Title $w.Title
-    $wb = Get-Bigrams $wn
     $best = $null; $bestScore = 0.0; $how = ''
-    foreach ($c in $Candidates) {
-      if ($c.Code -and $c.Code -eq $w.Code) { $best = $c; $bestScore = 1.0; $how = 'RJ番号が一致'; break }
-      if (-not $wn -or -not $c.Norm) { continue }
-      if ($c.Norm -eq $wn) { $best = $c; $bestScore = 1.0; $how = '作品名が一致'; break }
-      $score = Get-Similarity $wb $c.Bigrams
-      $short = [Math]::Min($wn.Length, $c.Norm.Length)
-      if ($short -ge 4 -and ($wn.Contains($c.Norm) -or $c.Norm.Contains($wn))) { $score = [Math]::Max($score, 0.85) }
-      if ($score -gt $bestScore) { $best = $c; $bestScore = $score; $how = '作品名が似ている' }
+    if ($w.Code -and $byCode.ContainsKey($w.Code)) {
+      $best = $byCode[$w.Code]; $bestScore = 1.0; $how = 'RJ番号が一致'
+    } else {
+      $wn = Normalize-Title $w.Title
+      # 片方がもう片方を含む（短い方が4文字以上）なら 0.85：「たぶん持っている」に入るよう、判定の厳しさの上限 0.95 より下にしてある
+      $m = [OwnedMatch]::Best($wn, (Get-Bigrams $wn), $norms, $bgs, 4, 0.85)
+      if ($m[0] -ge 0) {
+        $best = $cl[[int]$m[0]]; $bestScore = $m[1]
+        $how = if ($m[2]) { '作品名が一致' } else { '作品名が似ている' }
+      }
     }
     $status = if ($bestScore -ge 0.999) { 'owned' } elseif ($bestScore -ge $Threshold) { 'maybe' } else { 'notowned' }
     [pscustomobject]@{

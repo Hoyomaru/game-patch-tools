@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.5.0
+// @version      1.5.1
 // @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
 // @updateURL    https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
@@ -623,10 +623,17 @@
     takeLock();
     renderPanel();
     let floods = 0;
+    // 今回すでに試した作品。日数が0のときや、エラーが続く作品があっても、同じ作品に戻らず先へ進むため
+    const tried = new Set();
+    const nextCode = () => pending().find(c => !tried.has(c));
     try {
       while (!stopReq) {
-        const code = pending()[0];
-        if (!code) { autoMsg('すべて検索しました。'); break; }
+        const code = nextCode();
+        if (!code) {
+          const errors = auto.queue.filter(c => auto.results[c]?.error).length;
+          autoMsg(errors ? `すべて検索しました（エラー ${errors}件。「開始」でもう一度試せます）。` : 'すべて検索しました。');
+          break;
+        }
         autoMsg(`${code} を検索中…`);
         try {
           const prev = auto.results[code];
@@ -658,9 +665,10 @@
             break;
           }
         }
+        tried.add(code);   // 「多すぎる」で待った作品はここに来ないので、もう一度検索される
         saveAuto();
         renderPanel();
-        if (pending().length) await wait(auto.interval * 1000, '次の検索まで待機中');
+        if (nextCode()) await wait(auto.interval * 1000, '次の検索まで待機中');
       }
     } finally {
       running = false;
