@@ -2,28 +2,39 @@
 
 ゲームの翻訳パッチ探しと、気になる作品の管理を楽にするための個人用ツール集です。
 
+- **所持チェック**（Windows）：ブラウザのブックマークと手元のゲームフォルダを照らし合わせて、すでに持っている作品かどうかを判定します
+- **AS Patch Finder**（Tampermonkey）：フォーラムの検索結果を作品ごとにまとめて、最新版をハイライトします
+
 ## 所持チェック（Windows）
 
 ブラウザのブックマーク（気になる作品のDLsiteのURL）と、手元のゲームフォルダを照らし合わせて、すでに持っている作品かどうかを判定します。
 
-- `所持チェック.bat` をダブルクリックで起動（PowerShell 5.1 以上。追加のインストールは不要）
 - 判定は作品名の一致・似かたで行います（RJ番号がフォルダ名にあればそれも使用）
 - 持っている作品のブックマーク削除、URLのまとめて追加ができます（ブラウザ終了中のみ・毎回バックアップあり）
 - ネットにアクセスするのは「URL をまとめて追加」で作品名をDLsiteから取るときだけです（送るのはRJ番号だけ）
 - 「持っていない作品をASで検索」で、持っていない作品のRJ番号を付けてASの検索ページをブラウザで開きます（検索そのものは下の AS Patch Finder が行います）
 
-### 入手
+### 必要なもの
 
-- **git を使う場合**：`git clone https://github.com/Hoyomaru/game-patch-tools.git`。更新は `git pull`
+- Windows と PowerShell 5.1 以上（追加のインストールは不要）
+- Chrome か Edge（ブックマークを読むため）
+
+### インストール
+
+- **git を使う場合**：`git clone https://github.com/Hoyomaru/game-patch-tools.git`
 - **git を使わない場合**：GitHub の「Code」→「Download ZIP」で最新版を、「Tags」から版を選べばその版の ZIP を取れます（リリースを作らなくても、タグごとに ZIP があります）
   - 展開する前に、ZIP を右クリック →「プロパティ」→「許可する」にチェックを入れます。入れないと、起動するたびにセキュリティの警告が出ることがあります
-  - 更新するときは、新しいファイルで上書きします。`owned-gui-settings.json` と `bookmark-backups` は ZIP に入っていないので、そのまま残ります
 
-黒いウィンドウを出さずに起動したいときは、デスクトップなどに次のショートカットを作ります（パスは置いた場所に合わせる）。
+`所持チェック.bat` をダブルクリックすると起動します。黒いウィンドウを出さずに起動したいときは、デスクトップなどに次のショートカットを作ります（パスは置いた場所に合わせる）。
 
 ```
 C:\Windows\System32\conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "<置いた場所>\owned-gui.ps1"
 ```
+
+#### 更新
+
+- **git を使う場合**：`git pull`
+- **git を使わない場合**：新しいファイルで上書きします。`owned-gui-settings.json` と `bookmark-backups` は ZIP に入っていないので、そのまま残ります
 
 ### 使い方
 
@@ -39,26 +50,21 @@ C:\Windows\System32\conhost.exe --headless powershell.exe -NoProfile -ExecutionP
 
 消したり追加したりする前には、毎回 `bookmark-backups` にバックアップを取ります。元に戻すときは、ブラウザを終了してから「バックアップから戻す…」で選びます（戻す前の状態も `Bookmarks-before-restore-…` として残ります）。
 
-| ファイル | 内容 |
-|---|---|
-| `所持チェック.bat` | 起動用 |
-| `owned-gui.ps1` | 画面 |
-| `owned-core.ps1` | 判定・追加・削除の処理本体 |
-| `check-owned.ps1` | コマンド版 |
-
 設定（`owned-gui-settings.json`）、結果レポート、ブックマークのバックアップは、このフォルダに保存されます。これらは `.gitignore` でリポジトリの対象から外しています。
 
-## 検索結果のバージョン整理（Tampermonkey）
+## AS Patch Finder（Tampermonkey）
 
 `as-patch-finder.user.js`：フォーラムの検索結果で、タイトルからバージョン・日付・作品コードを抜き出し、作品ごとにまとめて最新版をハイライトします。
 
+### 必要なもの
+
+- Tampermonkey を入れたブラウザ
+
 ### インストール
 
-Tampermonkey を入れたブラウザで次のURLを開きます。
+次のURLを開いてインストールします。以降は Tampermonkey が自動で更新します。
 
 https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
-
-更新するときは、スクリプトの `@version` を上げてから push すると、Tampermonkey が自動で取り込みます。
 
 ### 自動検索（1.3.0〜）
 
@@ -78,18 +84,34 @@ RJ番号のリストを1件ずつASで検索して、見つかったスレッド
 - リストを入れ替えても前の結果は残ります。溜まってきたら「今のリストにない作品の結果を消す」で、今の検索対象に入っていない作品の結果と作品名を消せます（1.5.3〜）
 - 検索結果と作品名はそのブラウザの中にだけ保存されます。RJ番号のリストはURLの `#` より後ろで渡すので、検索するとき以外はASに送られません（作品名検索では、その作品名の前の方がASに送られます）
 
+## 開発メモ
+
+### ファイル
+
+| ファイル | 内容 |
+|---|---|
+| `所持チェック.bat` | 所持チェックの起動用 |
+| `owned-gui.ps1` | 所持チェックの画面 |
+| `owned-core.ps1` | 判定・追加・削除の処理本体 |
+| `check-owned.ps1` | 所持チェックのコマンド版 |
+| `as-patch-finder.user.js` | AS Patch Finder |
+
+### 文字コード
+
+PowerShell 5.1 は BOM のない ps1 を日本語の文字コード（CP932）として読むので、`*.ps1` は **UTF-8（BOM付き）** で保存します。`.editorconfig` と `.gitattributes` で、文字コードと改行（CRLF）をそろえています。
+
 ### テスト
 
-バージョンの読み取りや最新の判定を変えたら、次のコマンドで確かめます（Node.js 18 以上。追加のインストールは不要）。
+AS Patch Finder のバージョンの読み取りや最新の判定を変えたら、次のコマンドで確かめます（Node.js 18 以上。追加のインストールは不要）。
 
 ```
 node --test tests/
 ```
 
-## 編集するとき
+### AS Patch Finder の更新の出し方
 
-PowerShell 5.1 は BOM のない ps1 を日本語の文字コード（CP932）として読むので、`*.ps1` は **UTF-8（BOM付き）** で保存します。`.editorconfig` と `.gitattributes` で、文字コードと改行（CRLF）をそろえています。
+スクリプトの `@version` を上げてから push すると、Tampermonkey が自動で取り込みます。
 
 ## ライセンス
 
-MIT License（[LICENSE](LICENSE)）
+[MIT](LICENSE)
