@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.5.4
+// @version      1.5.5
 // @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
+// @icon         https://www.anime-sharing.com/styles/io/images/favicon.png
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
 // @updateURL    https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
 // @downloadURL  https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
