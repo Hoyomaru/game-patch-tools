@@ -11,6 +11,12 @@ Add-Type -Namespace Win32 -Name Dpi -MemberDefinition '[DllImport("user32.dll")]
 $SettingsPath = Join-Path $PSScriptRoot 'owned-gui-settings.json'
 $BackupDir    = Join-Path $PSScriptRoot 'bookmark-backups'
 $ReportPath   = Join-Path $PSScriptRoot 'owned-report.html'
+$LinksPath    = Join-Path $PSScriptRoot 'owned-links.json'
+
+# 「たぶん持っている」を自分で確かめた対応（読めなければ空から始める）
+try { $script:Links = Read-OwnedLinks $LinksPath } catch { $script:Links = @{ Same = @{}; Diff = @{} } }
+# 読み込んだ AS Patch Finder の検索結果（TSV）。@{ RJ番号 = 結果 }
+$script:ASInfo = $null
 
 $g = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
 # 注意: PowerShell の変数名は大文字小文字を区別しないので、イベントの $s（押されたボタン）とぶつからない名前にする
@@ -193,6 +199,7 @@ $act.Controls.Add((New-Button 'レポートをブラウザで開く' {
   if (Test-Path -LiteralPath $ReportPath) { Start-Process $ReportPath } else { Show-Info '先に「チェック開始」を押してください。' }
 }))
 $act.Controls.Add((New-Button '持っていない作品をASで検索' { Open-ASSearch }))
+$act.Controls.Add((New-Button '持っている作品の更新をASで確認' { Open-ASOwned }))
 $act.Controls.Add((New-Label '  見る深さ'))
 $numDepth = New-Object System.Windows.Forms.NumericUpDown
 $numDepth.Minimum = 1; $numDepth.Maximum = 6; $numDepth.Value = 2; $numDepth.Width = (px 48)
@@ -224,7 +231,7 @@ function New-Check([string]$text, [bool]$on) {
 $chkOwned = New-Check '持っている' $true
 $chkMaybe = New-Check 'たぶん持っている' $true
 $chkNot   = New-Check '持っていない' $true
-$flt.Controls.Add((New-Label '（作品名をダブルクリックで DLsite、手元の候補をダブルクリックでフォルダを開きます）'))
+$flt.Controls.Add((New-Label '（作品名をダブルクリックで DLsite、手元の候補でフォルダ、AS の欄でスレッドを開きます。右クリックで対応を覚えられます）'))
 
 # 4) 結果の表
 $grid = New-Object System.Windows.Forms.DataGridView
@@ -240,6 +247,7 @@ foreach ($c in @(
   @{ N = 'Status'; H = '判定';       W = 110 },
   @{ N = 'Title';  H = '作品名（気になるリスト）'; W = 330 },
   @{ N = 'Code';   H = 'RJ番号';     W = 100 },
+  @{ N = 'AS';     H = 'AS';         W = 150 },
   @{ N = 'Match';  H = '手元の候補'; W = 300 },
   @{ N = 'Score';  H = '似かた';     W = 72 }
 )) {
@@ -264,8 +272,39 @@ $grid.Add_CellDoubleClick({ param($s, $e) Invoke-Safe {
   if ($e.RowIndex -lt 0) { return }
   $r = $grid.Rows[$e.RowIndex].Tag
   $name = $grid.Columns[$e.ColumnIndex].Name
+  $info = if ($script:ASInfo) { $script:ASInfo[$r.Code] } else { $null }
   if ($name -eq 'Match' -and $r.MatchPath) { Start-Process explorer.exe "/select,`"$($r.MatchPath)`"" }
+  elseif ($name -eq 'AS' -and $info -and $info.Url) { Start-Process $info.Url }
+  elseif ($name -eq 'AS') { Start-Process "https://www.anime-sharing.com/search/search?keywords=$($r.Code)" }
   elseif ($name -ne 'Del') { Start-Process $r.Url }
+} })
+
+# 右クリック：手元の候補が同じ作品か別の作品かを覚える（次のチェックから使う）
+$rowMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$rowMenu.Font = $Font
+$miSame = $rowMenu.Items.Add('この手元の候補で合っている（次から「持っている」にする）')
+$miDiff = $rowMenu.Items.Add('この手元の候補は別の作品（次から候補にしない）')
+$miForget = $rowMenu.Items.Add('この作品について覚えたことを忘れる')
+$grid.ContextMenuStrip = $rowMenu
+# 開くときに、マウスの下の行を対象にする（行の外なら開かない）
+$rowMenu.Add_Opening({ param($s, $e)
+  $pt = $grid.PointToClient([System.Windows.Forms.Cursor]::Position)
+  $hit = $grid.HitTest($pt.X, $pt.Y)
+  if ($hit.RowIndex -lt 0) { $e.Cancel = $true; return }
+  $grid.ClearSelection(); $grid.Rows[$hit.RowIndex].Selected = $true
+  $r = $grid.Rows[$hit.RowIndex].Tag
+  $script:MenuRow = $r
+  $path = Get-RowCandidatePath $r
+  $miSame.Enabled = [bool]$path -and -not $r.Confirmed
+  $miDiff.Enabled = [bool]$path
+  $miForget.Enabled = [bool]($script:Links.Same[$r.Code] -or $script:Links.Diff[$r.Code])
+})
+$miSame.Add_Click({ Invoke-Safe { Set-RowLink $true } })
+$miDiff.Add_Click({ Invoke-Safe { Set-RowLink $false } })
+$miForget.Add_Click({ Invoke-Safe {
+  Clear-OwnedLink $script:Links $script:MenuRow.Code
+  Save-OwnedLinks $LinksPath $script:Links
+  Run-Check -ReuseCandidates -KeepChecks
 } })
 
 # 5) ブックマークの削除・復元
@@ -278,7 +317,9 @@ $bot.Controls.Add((New-Button 'バックアップから戻す…' { Restore-Back
 $bot.Controls.Add((New-Button 'バックアップのフォルダを開く' {
   New-Item -ItemType Directory -Force $BackupDir | Out-Null; Start-Process explorer.exe $BackupDir
 }))
-$bot.Controls.Add((New-Label '※ 消すときはブラウザを完全に終了しておいてください。消す前に毎回バックアップを取ります。'))
+$bot.Controls.Add((New-Button 'ASの結果を読み込む…' { Import-ASResults }))
+$bot.Controls.Add((New-Button 'ASで見つかった作品をフォルダにまとめる…' { Move-ASFound }))
+$bot.Controls.Add((New-Label '※ 消す・まとめるときはブラウザを完全に終了しておいてください。毎回バックアップを取ります。'))
 
 # ---------- 処理 ----------
 
@@ -307,8 +348,25 @@ function Get-Candidates([switch]$Reuse) {
   return ,$c
 }
 
+# 行の作品の手元の候補（「持っていない」なら、参考に出している「いちばん近い」候補）
+function Get-RowCandidatePath($r) { if ($r.MatchPath) { $r.MatchPath } else { $r.NearPath } }
+
+# 右クリックの「合っている」「別の作品」
+function Set-RowLink([bool]$same) {
+  $r = $script:MenuRow
+  $path = Get-RowCandidatePath $r
+  if (-not $r -or -not $path) { return }
+  Set-OwnedLink $script:Links $r.Code $path $same
+  Save-OwnedLinks $LinksPath $script:Links
+  Run-Check -ReuseCandidates -KeepChecks
+}
+
 # -ReuseCandidates: ゲームフォルダは調べ直さず、前回の候補で照らし合わせ直す（ブックマークを消したあと用）
-function Run-Check([switch]$ReuseCandidates) {
+# -KeepChecks: 判定が変わらなかった作品は、「消す」のチェックを今のまま残す（右クリックで対応を覚えたあと用）
+function Run-Check([switch]$ReuseCandidates, [switch]$KeepChecks) {
+  $prevStatus = @{}
+  if ($KeepChecks) { foreach ($r in $script:Results) { $prevStatus[$r.Code] = $r.Status } }
+  $prevDel = $script:DelState
   $sources = @($src.List.Items | ForEach-Object { "$_" })
   $dirs = @($gd.List.Items | ForEach-Object { "$_" })
   if ($sources.Count -eq 0) { Show-Info '① の「気になるリスト」を追加してください。'; return }
@@ -328,16 +386,21 @@ function Run-Check([switch]$ReuseCandidates) {
     if (-not $ReuseCandidates) { $lblStatus.Text = 'ゲームフォルダを調べています…'; $form.Refresh() }
     $cands = Get-Candidates -Reuse:$ReuseCandidates
     $lblStatus.Text = '照らし合わせています…'; $form.Refresh()
-    $script:Results = @(Compare-Owned $wish $cands ([double]$numTh.Value))
+    $script:Results = @(Compare-Owned $wish $cands ([double]$numTh.Value) $script:Links)
     Write-OwnedReport $script:Results $wish.Count $cands.Count ([double]$numTh.Value) $ReportPath
     # 初期状態：「持っている」は消す対象、「たぶん」は自分で選ぶ
     $script:DelState = @{}
-    foreach ($r in $script:Results) { $script:DelState[$r.Code] = ($r.Status -eq 'owned') }
+    foreach ($r in $script:Results) {
+      $keep = $KeepChecks -and $prevStatus[$r.Code] -eq $r.Status -and $prevDel.ContainsKey($r.Code)
+      $script:DelState[$r.Code] = $(if ($keep) { [bool]$prevDel[$r.Code] } else { $r.Status -eq 'owned' })
+    }
     Fill-Grid
     $o = @($script:Results | Where-Object Status -eq 'owned').Count
     $m = @($script:Results | Where-Object Status -eq 'maybe').Count
     $n = @($script:Results | Where-Object Status -eq 'notowned').Count
     $lblStatus.Text = "気になるリスト $($wish.Count) 作品 ／ 手元 $($cands.Count) 件 → 持っている $o ・ たぶん $m ・ 持っていない $n"
+    $cf = @($script:Results | Where-Object Confirmed).Count
+    if ($cf) { $lblStatus.Text += "（確かめた対応 $cf 作品を含む）" }
     $missing = @($script:MissingGameDirs)
     if ($missing.Count) {
       $lblStatus.Text += " ／ 見つからないゲームフォルダ $($missing.Count) か所を飛ばしました"
@@ -373,6 +436,107 @@ function Open-ASSearch {
   Start-Process ('https://www.anime-sharing.com/search/#apf-auto=' + ($codes -join ','))
 }
 
+# 持っている作品（RJ番号がわかるもの）を、フォルダ名から読んだ版といっしょに AS Patch Finder に渡す。
+# AS Patch Finder の「持っている作品」のリストに入り、検索するとASの最新と手元の版を比べる。
+# 渡すのは URL の # より後ろなので、ページを開いた時点ではサーバーに送られない。
+function Open-ASOwned {
+  $sources = @($src.List.Items | ForEach-Object { "$_" })
+  $dirs = @($gd.List.Items | ForEach-Object { "$_" })
+  if ($dirs.Count -eq 0) { Show-Info '② の「ゲームフォルダ」を追加してください。'; return }
+  $form.Cursor = 'WaitCursor'
+  try {
+    $lblStatus.Text = '持っている作品を集めています…'; $form.Refresh()
+    $cands = Get-Candidates -Reuse
+    $owned = @(Get-OwnedWorks $sources (Get-SelectedFolder) $BackupDir $cands ([double]$numTh.Value) $script:Links)
+  } finally { $form.Cursor = 'Default' }
+  $withVer = @($owned | Where-Object Version).Count
+  $lblStatus.Text = "持っている作品（RJ番号がわかるもの） $($owned.Count) 作品 ／ フォルダ名に版があるもの $withVer 作品"
+  if ($owned.Count -eq 0) {
+    Show-Info ("RJ番号がわかる持っている作品が見つかりませんでした。`n`n" +
+      "持っている作品は、① の気になるリストとブックマークのバックアップ（消したブックマーク）から作品名の一致で探すほか、フォルダ名に RJ番号が入っているものを使います。")
+    return
+  }
+  $parts = @($owned | ForEach-Object { if ($_.Version) { "$($_.Code)~$([uri]::EscapeDataString($_.Version))" } else { $_.Code } })
+  $url = 'https://www.anime-sharing.com/search/#apf-owned=' + ($parts -join ',')
+  if ($url.Length -gt 30000) { Show-Error "作品が多すぎて渡せません（$($owned.Count) 作品）。"; return }
+  $missing = @($script:MissingGameDirs).Count
+  $msg = "持っている $($owned.Count) 作品を、AS Patch Finder の「持っている作品」のリストに入れます。`n" +
+         "（RJ番号がわかるものだけ。① の気になるリストとブックマークのバックアップから作品名の一致で探したもの、フォルダ名に RJ番号があるもの）`n`n" +
+         "・フォルダ名から手元の版を読めたもの: $withVer 作品（ほかは AS のパネルで手で入れられます）`n" +
+         $(if ($missing) { "・見つからないゲームフォルダ $missing か所は飛ばしました`n" } else { '' }) +
+         "`nブラウザで AS の検索ページが開くので、「開始」を押すと順番に検索し、手元の版より新しい版があれば印を付けます。`n" +
+         "（Tampermonkey と AS Patch Finder 1.7.0 以降が必要です）`n`n開きますか？"
+  if (-not (Ask-YesNo $msg 'AS で更新を確認')) { return }
+  Start-Process $url
+}
+
+# 表の「AS」の欄の文字
+function Get-ASText([string]$code) {
+  if (-not $script:ASInfo) { return '' }
+  $i = $script:ASInfo[$code]
+  if (-not $i) { return '（読み込んだ結果になし）' }
+  if (-not $i.Found) { return $i.Kind }
+  $t = "見つかった $($i.Count) 件"
+  if ($i.Version) { $t += "`n最新 $($i.Version)" }
+  if ($i.Patch) { $t += ' パッチ/翻訳' }
+  if ($i.Mark) { $t += "`n[$($i.Mark)]" }
+  return $t
+}
+
+# AS Patch Finder の「ファイルに保存（TSV）」で保存した結果を読み込み、表の「AS」の欄に出す
+function Import-ASResults {
+  $dlg = New-Object System.Windows.Forms.OpenFileDialog
+  $dlg.Title = 'AS Patch Finder の検索結果（TSV）を選ぶ'
+  $dlg.Filter = 'AS Patch Finder の結果|as-search-*.tsv|TSV|*.tsv|すべてのファイル|*.*'
+  $dl = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'
+  if (Test-Path -LiteralPath $dl) {
+    $dlg.InitialDirectory = $dl
+    # いちばん新しい結果を最初から選んでおく
+    $latest = Get-ChildItem -LiteralPath $dl -Filter 'as-search-*.tsv' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($latest) { $dlg.FileName = $latest.Name }
+  }
+  if ($dlg.ShowDialog($form) -ne 'OK') { return }
+  $script:ASInfo = Read-ASResults $dlg.FileName
+  $found = @($script:ASInfo.Values | Where-Object Found).Count
+  Fill-Grid
+  $msg = "$(Split-Path $dlg.FileName -Leaf) を読み込みました（$($script:ASInfo.Count) 作品・見つかった $found 作品）。"
+  if (-not $script:Results) { $msg += "`n「チェック開始」を押すと、表の「AS」の欄に出ます。" }
+  Show-Info $msg
+}
+
+# 読み込んだ AS の結果で見つかった作品のブックマークを、① で選んでいるフォルダの中のサブフォルダにまとめる
+# （サブフォルダもこのフォルダの中なので、気になるリストからは外れない）
+function Move-ASFound {
+  if (-not $script:ASInfo) { Show-Info '先に「ASの結果を読み込む…」で、AS Patch Finder で保存した TSV を読み込んでください。'; return }
+  if (-not $script:Results) { Show-Info '先に「チェック開始」を押してください。'; return }
+  $folder = Get-SelectedFolder
+  if (-not $folder) { Show-Info '先に ① の「ブックマークのフォルダ」で、気になるリストのフォルダを選んでください（その中にサブフォルダを作ります）。'; return }
+  $target = Get-TargetBookmarks 'まとめる'
+  if (-not $target) { return }
+  # 持っている作品は消す対象なので除く。「見送り」の印を付けた作品も除く
+  $rows = @($script:Results | Where-Object { $_.Status -ne 'owned' -and $script:ASInfo[$_.Code].Found })
+  $skipN = @($rows | Where-Object { $script:ASInfo[$_.Code].Mark -eq '見送り' }).Count
+  $codes = @($rows | Where-Object { $script:ASInfo[$_.Code].Mark -ne '見送り' } | ForEach-Object Code)
+  if ($codes.Count -eq 0) { Show-Info 'まとめる作品がありません（AS で見つかった「持っていない」「たぶん」の作品がありません）。'; return }
+
+  Add-Type -AssemblyName Microsoft.VisualBasic
+  $name = [Microsoft.VisualBasic.Interaction]::InputBox(
+    "AS で見つかった $($codes.Count) 作品のブックマークを、「$folder」の中のこのフォルダにまとめます（なければ作ります）。`n`nフォルダ名:",
+    'フォルダにまとめる', 'ASで見つかった')
+  if (-not $name.Trim()) { return }
+  $plan = Move-BookmarksToSubfolder $target $folder $name.Trim() $codes $BackupDir -DryRun
+  if ($plan.Moved.Count -eq 0) { Show-Info "まとめるものはありません（どれもすでに「$($name.Trim())」の中にあります）。"; return }
+  $msg = "「$folder / $($name.Trim())」に $($plan.Moved.Count) 作品のブックマークを移します。" +
+         $(if ($plan.Created) { "`n・フォルダはまだないので作ります" } else { '' }) +
+         $(if ($skipN) { "`n・「見送り」の印を付けた $skipN 作品は移しません" } else { '' }) +
+         "`n`n移す前にバックアップを取ります。よろしいですか？"
+  if (-not (Ask-YesNo $msg 'まとめる確認')) { return }
+  if (-not (Wait-BrowserClosed $target)) { return }
+  $r = Move-BookmarksToSubfolder $target $folder $name.Trim() $codes $BackupDir
+  Show-Info "$($r.Moved.Count) 作品を移しました。`n（バックアップ: $(Split-Path $r.Backup -Leaf)）" 'まとめた結果'
+  Refresh-Folders
+}
+
 function Fill-Grid {
   $script:Filling = $true
   $grid.SuspendLayout()
@@ -382,7 +546,8 @@ function Fill-Grid {
   foreach ($r in ($script:Results | Sort-Object @{ e = { $order[$_.Status] } }, @{ e = { $_.Score }; Descending = $true })) {
     if (-not $show[$r.Status]) { continue }
     $match = if ($r.Match) { "$($r.Match)`n($($r.How))" } elseif ($r.NearName) { "いちばん近い: $($r.NearName)" } else { '' }
-    $i = $grid.Rows.Add([bool]$script:DelState[$r.Code], $StatusText[$r.Status], $r.Title, $r.Code, $match, $r.Score)
+    $st = $StatusText[$r.Status] + $(if ($r.Confirmed) { '（確かめた）' } else { '' })
+    $i = $grid.Rows.Add([bool]$script:DelState[$r.Code], $st, $r.Title, $r.Code, (Get-ASText $r.Code), $match, $r.Score)
     $row = $grid.Rows[$i]
     $row.Tag = $r
     $row.DefaultCellStyle.BackColor = $StatusColor[$r.Status]
@@ -488,7 +653,7 @@ function Invoke-BulkAdd([string]$text, [string]$target, [string]$folder, [bool]$
     if ($skipOwned -and $dirs.Count) {
       $cands = Get-Candidates -Reuse
       $owned = @{}
-      Compare-Owned $items $cands ([double]$numTh.Value) | Where-Object Status -eq 'owned' | ForEach-Object { $owned[$_.Code] = 1 }
+      Compare-Owned $items $cands ([double]$numTh.Value) $script:Links | Where-Object Status -eq 'owned' | ForEach-Object { $owned[$_.Code] = 1 }
       $ownedN = $owned.Count
       $items = @($items | Where-Object { -not $owned[$_.Code] })
     }
@@ -536,15 +701,23 @@ function Delete-Checked {
     Show-Info "自動で消せるのは、① に Chrome / Edge のブックマークを追加しているときだけです。`n（Session Buddy などのエクスポートファイルは消せません）"
     return
   }
-  $maybeN = @($script:Results | Where-Object { $_.Status -eq 'maybe' -and $script:DelState[$_.Code] }).Count
+  $maybeRows = @($script:Results | Where-Object { $_.Status -eq 'maybe' -and $script:DelState[$_.Code] })
+  $maybeN = $maybeRows.Count
   $folder = Get-SelectedFolder
   $msg = "$($codes.Count) 作品のブックマークを消します。"
-  if ($maybeN) { $msg += "`n（うち「たぶん持っている」が $maybeN 作品）" }
+  if ($maybeN) { $msg += "`n（うち「たぶん持っている」が $maybeN 作品。この手元の候補で合っていると覚えます）" }
   $hiddenN = Get-HiddenCheckedCount
   if ($hiddenN) { $msg += "`n（うち、表示の絞り込みで今は表に出ていないものが $hiddenN 作品）" }
   $msg += "`n対象: " + $(if ($folder) { "フォルダ「$folder」の中だけ" } else { 'ブックマーク全体' })
   $msg += "`n`n消す前にバックアップを取ります。よろしいですか？"
   if (-not (Ask-YesNo $msg '削除の確認')) { return }
+
+  # 「たぶん」を消すのは、その候補で合っていると確かめたということなので覚えておく
+  # （「持っている作品の更新をASで確認」で、消したあとも持っている作品として扱うため）
+  if ($maybeN) {
+    foreach ($r in $maybeRows) { if ($r.MatchPath) { Set-OwnedLink $script:Links $r.Code $r.MatchPath $true } }
+    try { Save-OwnedLinks $LinksPath $script:Links } catch { }
+  }
 
   $report = New-Object System.Collections.Generic.List[string]
   foreach ($bf in $bmFiles) {

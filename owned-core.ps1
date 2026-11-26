@@ -31,7 +31,7 @@ function Get-Bigrams([string]$s) {
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
-public static class OwnedMatch {
+public static class OwnedMatch2 {
   // 2文字ずつに区切った重なり具合（0〜1）
   public static double Dice(HashSet<string> a, HashSet<string> b) {
     if (a == null || b == null || a.Count == 0 || b.Count == 0) return 0.0;
@@ -42,11 +42,13 @@ public static class OwnedMatch {
   // 作品名 wn にいちばん似ている候補を探す。戻り値: { 候補の番号（なければ -1）, 似かた, 完全一致なら 1 }
   //   完全一致 → 1.0 ですぐ返す
   //   片方がもう片方を含む（短い方が containMin 文字以上）→ 少なくとも containScore
+  //   skip に入っている候補は見ない（「別の作品」と確かめた候補）
   public static double[] Best(string wn, HashSet<string> wb, string[] norms, HashSet<string>[] bgs,
-                               int containMin, double containScore) {
+                               int containMin, double containScore, HashSet<int> skip) {
     int idx = -1; double best = 0.0;
     if (string.IsNullOrEmpty(wn)) return new double[] { -1, 0, 0 };
     for (int i = 0; i < norms.Length; i++) {
+      if (skip != null && skip.Contains(i)) continue;
       string cn = norms[i];
       if (string.IsNullOrEmpty(cn)) continue;
       if (cn == wn) return new double[] { i, 1.0, 1 };
@@ -60,7 +62,7 @@ public static class OwnedMatch {
 '@
 
 # 2文字ずつに区切った重なり具合（0〜1）
-function Get-Similarity($bgA, $bgB) { [OwnedMatch]::Dice($bgA, $bgB) }
+function Get-Similarity($bgA, $bgB) { [OwnedMatch2]::Dice($bgA, $bgB) }
 
 # ---------- 1. 気になるリストを読む ----------
 
@@ -166,26 +168,39 @@ function Get-GameCandidates([string[]]$Dirs, [int]$Depth = 2) {
 # ---------- 3. 照らし合わせ ----------
 
 # Status: owned（持っている）/ maybe（たぶん）/ notowned（持っていない）
-function Compare-Owned($Wishlist, $Candidates, [double]$Threshold = 0.6) {
-  # 候補を配列にしておき、作品ごとの比較は C#（OwnedMatch）に任せる
+# $Links: Read-OwnedLinks の戻り値。自分で確かめた対応を先に使う
+#   Same[RJ番号] = 手元のパス … その候補で「持っている」（候補の中にそのパスがあるときだけ）
+#   Diff[RJ番号] = パスの一覧 … その候補は「別の作品」なので、似ていても選ばない
+function Compare-Owned($Wishlist, $Candidates, [double]$Threshold = 0.6, $Links = $null) {
+  # 候補を配列にしておき、作品ごとの比較は C#（OwnedMatch2）に任せる
   # @($Candidates) は New-Object で作った List だと「引数の型が一致しません」になるので、パイプラインで配列にする
   $cl = @($Candidates | ForEach-Object { $_ })
   $norms = [string[]]::new($cl.Count)
   $bgs = [System.Collections.Generic.HashSet[string][]]::new($cl.Count)
   $byCode = @{}
+  $byPath = @{}
   for ($i = 0; $i -lt $cl.Count; $i++) {
     $norms[$i] = [string]$cl[$i].Norm
     $bgs[$i] = $cl[$i].Bigrams
     if ($cl[$i].Code -and -not $byCode.ContainsKey($cl[$i].Code)) { $byCode[$cl[$i].Code] = $cl[$i] }
+    $byPath[[string]$cl[$i].Path] = $i
   }
   foreach ($w in $Wishlist) {
-    $best = $null; $bestScore = 0.0; $how = ''
-    if ($w.Code -and $byCode.ContainsKey($w.Code)) {
+    $best = $null; $bestScore = 0.0; $how = ''; $confirmed = $false
+    $samePath = if ($Links -and $w.Code) { $Links.Same[$w.Code] } else { $null }
+    if ($samePath -and $byPath.ContainsKey($samePath)) {
+      $best = $cl[$byPath[$samePath]]; $bestScore = 1.0; $how = '確かめた対応'; $confirmed = $true
+    } elseif ($w.Code -and $byCode.ContainsKey($w.Code)) {
       $best = $byCode[$w.Code]; $bestScore = 1.0; $how = 'RJ番号が一致'
     } else {
+      $skip = $null
+      if ($Links -and $w.Code -and $Links.Diff[$w.Code]) {
+        $skip = New-Object 'System.Collections.Generic.HashSet[int]'
+        foreach ($p in @($Links.Diff[$w.Code])) { if ($byPath.ContainsKey([string]$p)) { [void]$skip.Add($byPath[[string]$p]) } }
+      }
       $wn = Normalize-Title $w.Title
       # 片方がもう片方を含む（短い方が4文字以上）なら 0.85：「たぶん持っている」に入るよう、判定の厳しさの上限 0.95 より下にしてある
-      $m = [OwnedMatch]::Best($wn, (Get-Bigrams $wn), $norms, $bgs, 4, 0.85)
+      $m = [OwnedMatch2]::Best($wn, (Get-Bigrams $wn), $norms, $bgs, 4, 0.85, $skip)
       if ($m[0] -ge 0) {
         $best = $cl[[int]$m[0]]; $bestScore = $m[1]
         $how = if ($m[2]) { '作品名が一致' } else { '作品名が似ている' }
@@ -195,13 +210,122 @@ function Compare-Owned($Wishlist, $Candidates, [double]$Threshold = 0.6) {
     $status = if ($bestScore -ge 0.999) { 'owned' } elseif ($bestScore -ge $Threshold) { 'maybe' } else { 'notowned' }
     [pscustomobject]@{
       Code = $w.Code; Url = $w.Url; Title = $(if ($w.Title) { $w.Title } else { '(タイトル不明)' })
-      Status = $status; Score = [Math]::Round($bestScore, 2); How = $how
+      Status = $status; Score = [Math]::Round($bestScore, 2); How = $how; Confirmed = $confirmed
       Match = $(if ($best -and $status -ne 'notowned') { $best.Name } else { '' })
       MatchPath = $(if ($best -and $status -ne 'notowned') { $best.Path } else { '' })
       # 「持っていない」でも 0.4 以上なら参考に「いちばん近い」を出す（判定の厳しさを下げるかの目安。最小 0.3 より少し上）
       NearName = $(if ($best -and $status -eq 'notowned' -and $bestScore -ge 0.4) { $best.Name } else { '' })
+      NearPath = $(if ($best -and $status -eq 'notowned' -and $bestScore -ge 0.4) { $best.Path } else { '' })
     }
   }
+}
+
+# ---------- 3b. 確かめた対応（owned-links.json） ----------
+
+# 「たぶん持っている」を自分で確かめた結果。ファイルの形: { "same": { "RJ…": "手元のパス" }, "diff": { "RJ…": ["パス", …] } }
+# 戻り値: @{ Same = @{ RJ番号 = パス }; Diff = @{ RJ番号 = @(パス…) } }
+function Read-OwnedLinks([string]$Path) {
+  $links = @{ Same = @{}; Diff = @{} }
+  if (-not (Test-Path -LiteralPath $Path)) { return $links }
+  $o = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($o.same) { foreach ($p in $o.same.PSObject.Properties) { $links.Same[$p.Name] = [string]$p.Value } }
+  if ($o.diff) { foreach ($p in $o.diff.PSObject.Properties) { $links.Diff[$p.Name] = @($p.Value | ForEach-Object { [string]$_ }) } }
+  return $links
+}
+
+function Save-OwnedLinks([string]$Path, $Links) {
+  $same = [ordered]@{}; foreach ($k in @($Links.Same.Keys | Sort-Object)) { $same[$k] = $Links.Same[$k] }
+  $diff = [ordered]@{}; foreach ($k in @($Links.Diff.Keys | Sort-Object)) { if (@($Links.Diff[$k]).Count) { $diff[$k] = @($Links.Diff[$k]) } }
+  $json = [ordered]@{ same = $same; diff = $diff } | ConvertTo-Json -Depth 5
+  [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding $false))
+}
+
+# 作品（RJ番号）と手元のパスの対応を覚える。$Same なら「同じ作品」、そうでなければ「別の作品」
+function Set-OwnedLink($Links, [string]$Code, [string]$MatchPath, [bool]$Same) {
+  if ($Same) {
+    $Links.Same[$Code] = $MatchPath
+    if ($Links.Diff[$Code]) { $Links.Diff[$Code] = @($Links.Diff[$Code] | Where-Object { $_ -ne $MatchPath }) }
+  } else {
+    if ($Links.Same[$Code] -eq $MatchPath) { $Links.Same.Remove($Code) }
+    $Links.Diff[$Code] = @(@($Links.Diff[$Code]) + $MatchPath | Where-Object { $_ } | Select-Object -Unique)
+  }
+}
+
+function Clear-OwnedLink($Links, [string]$Code) {
+  $Links.Same.Remove($Code); $Links.Diff.Remove($Code)
+}
+
+# ---------- 3c. 持っている作品の一覧（AS で更新を確かめる用） ----------
+
+# フォルダ名・ファイル名から版を読む（「v1.02」「Ver.1.0.3」「ver23.11.13」など）。なければ空
+function Get-FolderVersion([string]$Name) {
+  if ($Name -match '(?i)(?:\bver(?:sion)?\.?\s*|\bv)(\d+(?:[._\-]\d+)*[a-z]?)(?![\w.])') {
+    return ($Matches[1] -replace '_', '.')
+  }
+  return ''
+}
+
+# 持っている作品（RJ番号がわかるもの）を集める。
+#   ・今の気になるリストと、ブックマークのバックアップ（消したブックマーク＝持っている作品が残っている）を照らし合わせて
+#     「持っている」になったもの（RJ番号か作品名の完全一致、または確かめた対応）
+#   ・フォルダ名に RJ番号が入っているもの
+# 戻り値: Code / Path / Name / Version（フォルダ名から読んだ版）の一覧
+function Get-OwnedWorks([string[]]$Sources, [string]$Folder, [string]$BackupDir, $Candidates, [double]$Threshold, $Links) {
+  $wish = [ordered]@{}
+  foreach ($w in @(Read-Wishlist $Sources $Folder)) { if (-not $wish.Contains($w.Code)) { $wish[$w.Code] = $w } }
+  if ($BackupDir -and (Test-Path -LiteralPath $BackupDir)) {
+    $files = @(Get-ChildItem -LiteralPath $BackupDir -Filter 'Bookmarks-*' -File -ErrorAction SilentlyContinue | ForEach-Object FullName)
+    if ($files.Count) {
+      foreach ($w in @(Read-Wishlist $files '')) {
+        if (-not $wish.Contains($w.Code)) { $wish[$w.Code] = $w }
+        elseif (-not $wish[$w.Code].Title -and $w.Title) { $wish[$w.Code].Title = $w.Title }
+      }
+    }
+  }
+  $out = [ordered]@{}
+  foreach ($r in @(Compare-Owned @($wish.Values) $Candidates $Threshold $Links)) {
+    if ($r.Status -eq 'owned') { $out[$r.Code] = [pscustomobject]@{ Code = $r.Code; Path = $r.MatchPath; Name = $r.Match } }
+  }
+  foreach ($c in @($Candidates | ForEach-Object { $_ })) {
+    if ($c.Code -and -not $out.Contains($c.Code)) { $out[$c.Code] = [pscustomobject]@{ Code = $c.Code; Path = $c.Path; Name = $c.Name } }
+  }
+  foreach ($o in $out.Values) { $o | Add-Member -NotePropertyName Version -NotePropertyValue (Get-FolderVersion $o.Name) }
+  return @($out.Values)
+}
+
+# ---------- 3d. AS Patch Finder の検索結果（TSV）を読む ----------
+
+# 戻り値: @{ RJ番号 = [pscustomobject]@{ Found; Kind（見つかった/なし/エラー/未検索）; Version; Url; Title; Mark; Cmp; Patch; Count } }
+# 列は見出しの名前で探す（AS Patch Finder の版によって列の数が違うため）
+function Read-ASResults([string]$Path) {
+  $lines = @(Get-Content -LiteralPath $Path -Encoding UTF8)
+  if ($lines.Count -eq 0) { throw 'ファイルが空です。' }
+  $head = $lines[0].TrimStart([char]0xFEFF) -split "`t"
+  $col = @{}; for ($i = 0; $i -lt $head.Count; $i++) { $col[$head[$i]] = $i }
+  foreach ($need in '作品コード', '種類', '最新', 'URL') {
+    if (-not $col.ContainsKey($need)) { throw "AS Patch Finder の TSV ではないようです（「$need」の列がありません）。" }
+  }
+  $get = { param($cells, $name) if ($col.ContainsKey($name) -and $col[$name] -lt $cells.Count) { $cells[$col[$name]] } else { '' } }
+  $res = @{}
+  foreach ($line in ($lines | Select-Object -Skip 1)) {
+    if (-not $line.Trim()) { continue }
+    $cells = $line -split "`t"
+    $code = (& $get $cells '作品コード').Trim().ToUpperInvariant()
+    if (-not $code) { continue }
+    $kind = & $get $cells '種類'
+    $cur = $res[$code]
+    if (-not $cur) {
+      $cur = [pscustomobject]@{ Found = $false; Kind = ''; Version = ''; Url = ''; Title = ''; Mark = (& $get $cells '印'); Cmp = ''; Patch = $false; Count = 0 }
+      $res[$code] = $cur
+    }
+    if ($kind -in 'なし', 'エラー', '未検索') { if (-not $cur.Found) { $cur.Kind = $kind }; continue }
+    $cur.Found = $true; $cur.Kind = '見つかった'; $cur.Count++
+    if ((& $get $cells '最新') -eq '★') {
+      $cur.Version = & $get $cells 'バージョン'; $cur.Url = & $get $cells 'URL'; $cur.Title = & $get $cells 'タイトル'
+      $cur.Patch = ((& $get $cells 'パッチ/翻訳') -eq '○'); $cur.Cmp = & $get $cells '手元と比べて'
+    } elseif (-not $cur.Url) { $cur.Url = & $get $cells 'URL' }
+  }
+  return $res
 }
 
 # ---------- 4. HTML レポート ----------
@@ -471,6 +595,69 @@ function Add-BookmarksToFolder([string]$Path, [string]$Folder, $Items, [string]$
 
   $result.Backup = Backup-BookmarksFile $full $BackupDir
   $target.children = @(@($target.children) + $newNodes.ToArray() | Where-Object { $null -ne $_ })
+  Save-BookmarksJson $full $json
+  return $result
+}
+
+# ---------- 7. フォルダの中のサブフォルダへ移す ----------
+
+# $Folder（道順）の中にある、$Codes の作品のブックマークを、その中のサブフォルダ $SubName へ移す（なければ作る）。
+# すでに $SubName の中にあるものはそのまま。DLsite 以外のブックマークやフォルダには触れない。
+# 戻り値: @{ Moved = 移したブックマーク名の一覧; Created = サブフォルダを作ったか; Backup }
+function Move-BookmarksToSubfolder([string]$Path, [string]$Folder, [string]$SubName, [string[]]$Codes, [string]$BackupDir, [switch]$DryRun) {
+  if (-not $SubName.Trim()) { throw '移す先のフォルダ名が空です。' }
+  $codeSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($c in $Codes) { [void]$codeSet.Add($c) }
+  $full = (Resolve-Path -LiteralPath $Path).Path
+  $json = Get-Content -LiteralPath $full -Raw -Encoding UTF8 | ConvertFrom-Json
+  $target = @(Get-BookmarkFolderNodes $json $Folder) | Select-Object -First 1
+  if (-not $target) { throw "ブックマークのフォルダが見つかりません: $Folder" }
+
+  # 移す先のサブフォルダ（$Folder の直下）。なければ作る
+  $sub = @($target.children) | Where-Object { $_.type -eq 'folder' -and $_.name -eq $SubName } | Select-Object -First 1
+  $created = $false
+  if (-not $sub) {
+    $ids = @{ Max = [long]0 }
+    $scanId = {
+      param($node)
+      $n = 0; if ([long]::TryParse("$($node.id)", [ref]$n) -and $n -gt $ids.Max) { $ids.Max = $n }
+      foreach ($c in @($node.children)) { if ($c) { & $scanId $c } }
+    }
+    foreach ($r in $json.roots.PSObject.Properties) { if ($r.Value -is [pscustomobject]) { & $scanId $r.Value } }
+    $now = Get-ChromeTime
+    $sub = [pscustomobject][ordered]@{
+      children = @(); date_added = $now; date_last_used = '0'; date_modified = $now
+      guid = [guid]::NewGuid().ToString(); id = [string]($ids.Max + 1); name = $SubName; type = 'folder'
+    }
+    $created = $true
+  }
+
+  # $Folder の中（$SubName の中は除く）から、対象の作品のブックマークを抜き出す
+  $moved = New-Object System.Collections.Generic.List[object]
+  $have = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($c in @($sub.children)) { if ($c -and $c.type -eq 'url' -and $c.url -match $script:CodeRe) { [void]$have.Add($Matches[1]) } }
+  $pull = {
+    param($node)
+    if ($null -eq $node.children) { return }
+    $keep = New-Object System.Collections.Generic.List[object]
+    foreach ($c in $node.children) {
+      if ($c.type -eq 'url' -and $c.url -match 'dlsite\.com' -and $c.url -match $script:CodeRe -and $codeSet.Contains($Matches[1])) {
+        # サブフォルダにもうある作品（同じ作品のブックマークが2つある）は、移さずにそのまま残す
+        if (-not $have.Contains($Matches[1])) { [void]$have.Add($Matches[1]); $moved.Add($c); continue }
+      }
+      if ($c.type -eq 'folder' -and -not [object]::ReferenceEquals($c, $sub)) { & $pull $c }
+      $keep.Add($c)
+    }
+    $node.children = $keep.ToArray()
+  }
+  & $pull $target
+
+  $result = @{ Moved = @($moved | ForEach-Object { "$($_.name)" }); Created = $created; Backup = $null }
+  if ($DryRun -or $moved.Count -eq 0) { return $result }
+
+  $sub.children = @(@($sub.children) + $moved.ToArray() | Where-Object { $null -ne $_ })
+  if ($created) { $target.children = @(@($target.children) + $sub | Where-Object { $null -ne $_ }) }
+  $result.Backup = Backup-BookmarksFile $full $BackupDir
   Save-BookmarksJson $full $json
   return $result
 }

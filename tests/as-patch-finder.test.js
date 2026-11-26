@@ -13,7 +13,7 @@ const start = src.indexOf('// ---------- 解析 ----------');
 const end = src.indexOf('// ---------- 表示 ----------');
 assert.ok(start >= 0 && end > start, '解析／表示の印が見つかりません');
 const apf = new Function(src.slice(start, end) +
-  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, orphanCodes, titleKeyword, titleMatches, codeOf, isRequest, orderGroup, parseRevisions, revDateOf };')();
+  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, orphanCodes, titleKeyword, titleMatches, codeOf, isRequest, orderGroup, parseRevisions, revDateOf, markActive, parseLocalVersion, compareLocal, parseOwnedList };')();
 
 const T = (title, extra = {}) => Object.assign({ title, url: 'https://example.invalid/' + encodeURIComponent(title), hasCode: true, posted: 0, kind: 'thread' }, extra);
 const info = (title, posted = 0) => {
@@ -232,4 +232,49 @@ test('バージョン番号と日付版を DLsite の更新情報で比べる', 
   // 番号が更新情報と一致する新しい版なら、古い日付版に勝つ
   const rk2 = apf.rankThreads([T2('RJ01 Game v1.0.3', '2026-10-05'), T2('RJ01 Game Ver26.09.26', '2026-09-27')], revs);
   assert.equal(rk2.latest.title, 'RJ01 Game v1.0.3');
+});
+
+test('確認済み・見送りの印', () => {
+  assert.equal(apf.markActive(null, {}), null);
+  assert.equal(apf.markActive({ s: 'done', at: 100 }, { threads: [] }), 'done');
+  // 確認済みのあとに新着・更新が付いたら外れる。前から付いていた印（at なし・古い at）では外れない
+  assert.equal(apf.markActive({ s: 'done', at: 100 }, { changes: { newCount: 1, at: 200 } }), null);
+  assert.equal(apf.markActive({ s: 'done', at: 100 }, { changes: { newCount: 1, at: 50 } }), 'done');
+  assert.equal(apf.markActive({ s: 'done', at: 100 }, { changes: { newCount: 1 } }), 'done');
+  // 見送りは外れない
+  assert.equal(apf.markActive({ s: 'skip', at: 100 }, { changes: { newCount: 1, at: 200 } }), 'skip');
+  // 新着の印の時刻は、新しい方を残す
+  assert.equal(apf.mergeChanges({ newCount: 1, latestChanged: false, from: '', to: 'v1', at: 5 },
+    { newCount: 1, latestChanged: false, from: '', to: 'v1', at: 9 }).at, 9);
+});
+
+test('手元の版と最新の比べ方', () => {
+  assert.deepEqual(apf.parseLocalVersion('1.02'), { version: '1.02', dateVer: null });
+  assert.deepEqual(apf.parseLocalVersion('v1.02'), { version: '1.02', dateVer: null });
+  assert.deepEqual(apf.parseLocalVersion('23.11.13'), { version: null, dateVer: '2023-11-13' });
+  assert.deepEqual(apf.parseLocalVersion('2023-11-13'), { version: null, dateVer: '2023-11-13' });
+  assert.equal(apf.parseLocalVersion(''), null);
+  assert.equal(apf.parseLocalVersion('最新'), null);
+
+  const L = t => apf.rankThreads([T(t)]).latest;
+  assert.equal(apf.compareLocal('1.0', L('RJ01 Game v1.2')), 'newer');
+  assert.equal(apf.compareLocal('v1.2', L('RJ01 Game v1.2')), 'same');
+  assert.equal(apf.compareLocal('1.3', L('RJ01 Game v1.2')), 'older');
+  assert.equal(apf.compareLocal('2023-11-13', L('RJ01 Game Ver23.12.01')), 'newer');
+  assert.equal(apf.compareLocal('1.0', L('RJ01 Game English')), 'unknown');      // 最新に版の表記がない
+  assert.equal(apf.compareLocal('', L('RJ01 Game v1.2')), 'unknown');
+  // バージョン番号と日付版は、DLsite の更新情報で日がわかれば比べる
+  const revs = [{ date: '2026-10-03', version: '1.0.3' }, { date: '2026-09-26', version: '1.0.2' }];
+  const lt = apf.rankThreads([T('RJ01 Game Ver26.10.03')], revs).latest;
+  assert.equal(apf.compareLocal('1.0.2', lt, revs), 'newer');
+  assert.equal(apf.compareLocal('1.0.3', lt, revs), 'same');
+  assert.equal(apf.compareLocal('1.0.2', apf.rankThreads([T('RJ01 Game Ver26.10.03')]).latest), 'unknown');
+});
+
+test('所持チェックから渡される持っている作品のリスト', () => {
+  assert.deepEqual(apf.parseOwnedList('RJ01234567~1.02, rj07654321 ,RJ01234567,BAD,VJ012345~23.11.13'), {
+    codes: ['RJ01234567', 'RJ07654321', 'VJ012345'],
+    versions: { RJ01234567: '1.02', VJ012345: '23.11.13' },
+  });
+  assert.deepEqual(apf.parseOwnedList(''), { codes: [], versions: {} });
 });

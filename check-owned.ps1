@@ -46,7 +46,11 @@ $cands = Get-GameCandidates $GameDirs $Depth
 foreach ($d in @($script:MissingGameDirs)) { Write-Warning "ゲームフォルダが見つからないので飛ばしました: $d" }
 Write-Host ("気になるリスト: {0} 作品 ／ ゲームフォルダ内の候補: {1} 件" -f $wish.Count, $cands.Count)
 
-$results = @(Compare-Owned $wish $cands $Threshold)
+# GUI で確かめた対応（owned-links.json）があれば使う
+$links = $null
+$linksPath = Join-Path $PSScriptRoot 'owned-links.json'
+if (Test-Path -LiteralPath $linksPath) { $links = Read-OwnedLinks $linksPath }
+$results = @(Compare-Owned $wish $cands $Threshold $links)
 Write-OwnedReport $results $wish.Count $cands.Count $Threshold $Out
 
 $o = @($results | Where-Object Status -eq 'owned').Count

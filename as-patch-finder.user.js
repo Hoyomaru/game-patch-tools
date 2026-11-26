@@ -1,15 +1,22 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.6.0
-// @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
+// @version      1.7.0
+// @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。持っている作品・気になる作品の印をASのページに、検索結果を DLsite の作品ページに出します。
 // @icon         https://www.anime-sharing.com/styles/io/images/favicon.png
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
 // @updateURL    https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
 // @downloadURL  https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
 // @match        https://www.anime-sharing.com/search/*
 // @match        https://anime-sharing.com/search/*
+// @match        https://www.anime-sharing.com/forums/*
+// @match        https://anime-sharing.com/forums/*
+// @match        https://www.anime-sharing.com/threads/*
+// @match        https://anime-sharing.com/threads/*
+// @match        https://www.dlsite.com/*/work/=/product_id/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      www.dlsite.com
 // @run-at       document-idle
 // ==/UserScript==
@@ -309,12 +316,58 @@
   function mergeChanges(older, newer) {
     if (!older) return newer || null;
     if (!newer) return older;
+    const at = newer.at || older.at;
     return {
       newCount: older.newCount + newer.newCount,
       latestChanged: older.latestChanged || newer.latestChanged,
       from: older.latestChanged ? older.from : newer.from,
       to: newer.to,
+      ...(at ? { at } : {}),
     };
+  }
+
+  // 作品に付けた「確認済み」「見送り」の印がまだ効いているか。
+  // 「確認済み」は、付けたあとに新着・更新の印（changes.at）が付いたら外れる（見落とさないように）。「見送り」は外れない
+  function markActive(mark, result) {
+    if (!mark) return null;
+    if (mark.s === 'done' && result?.changes && (result.changes.at || 0) > mark.at) return null;
+    return mark.s;
+  }
+
+  // 手元の版の文字（「1.02」「v1.02」「23.11.13」「2023-11-13」など）を、スレッドと同じ形 { version, dateVer } にする
+  function parseLocalVersion(s) {
+    s = String(s || '').trim();
+    if (!s) return null;
+    const pv = parseVersion(/^v|^ver/i.test(s) ? s : 'v' + s);
+    return pv.version || pv.dateVer ? pv : null;
+  }
+
+  // 手元の版と、ASの最新スレッドの版を比べる。
+  //   'newer' … ASの方が新しい ／ 'same' … 同じ ／ 'older' … 手元の方が新しい ／ 'unknown' … 比べられない
+  //   バージョン番号と日付版は、DLsite の更新情報（revs）で同じ版の日がわかるときだけ比べる
+  function compareLocal(local, latest, revs = null) {
+    const l = parseLocalVersion(local);
+    if (!l || !latest || !tier(latest)) return 'unknown';
+    const sign = n => (n > 0 ? 'newer' : n < 0 ? 'older' : 'same');
+    if (l.version && latest.version) return sign(cmpVersion(latest.version, l.version));
+    if (l.dateVer && latest.dateVer) return sign(cmpStr(latest.dateVer, l.dateVer));
+    const ld = revDateOf(Object.assign({ posted: 0 }, l), revs);
+    const rd = latest.revDate ?? revDateOf(latest, revs);
+    return ld && rd && ld !== '0000-00-00' ? sign(cmpStr(rd, ld)) : 'unknown';
+  }
+
+  // 所持チェックから渡される「持っている作品」のリスト：「RJ01234567~1.02,RJ07654321,…」
+  // 戻り値: { codes: [...], versions: { 作品コード: 手元の版 } }
+  function parseOwnedList(text) {
+    const codes = [], versions = {};
+    for (const part of String(text || '').split(',')) {
+      const m = part.trim().match(/^((?:RJ|VJ|BJ|RE)\d{6,8})(?:~(.+))?$/i);
+      if (!m) continue;
+      const c = m[1].toUpperCase();
+      if (!codes.includes(c)) codes.push(c);
+      if (m[2]) versions[c] = m[2].trim();
+    }
+    return { codes, versions };
   }
 
   // 今の検索対象（queue）に入っていない作品のコード。検索結果か作品名が保存されているもの。
@@ -372,6 +425,12 @@
     .apf-nover{opacity:.7}
     .apf-latest{background:#15803d;color:#fff;border-color:#15803d;font-weight:bold}
     .apf-old{background:#9ca3af33}
+    .apf-own{background:#7c3aed;color:#fff;border-color:#7c3aed}
+    .apf-wish{background:#0e7490;color:#fff;border-color:#0e7490}
+    .apf-cmp-newer{background:#c2410c;color:#fff;border-color:#c2410c;font-weight:bold}
+    .apf-mk{font-size:11px;line-height:1.6;padding:0 6px;border-radius:3px;cursor:pointer;
+      border:1px solid rgba(127,127,127,.5);background:transparent;color:inherit}
+    .apf-mk.apf-on{background:#475569;color:#fff;border-color:#475569}
     .apf-row-latest{box-shadow:inset 4px 0 0 #16a34a}
     .apf-dim{opacity:.35}
     .apf-hidden{display:none !important}
@@ -415,8 +474,43 @@
     if (info.posted) box.appendChild(badge('投稿 ' + fmtDate(info.posted)));
     if (info.code) box.appendChild(badge(info.code));
     if (info.isPatch) box.appendChild(badge('パッチ/翻訳'));
+    if (info.code) box.append(...workBadges(info.code));
     info.li.classList.toggle('apf-row-latest', groupSize > 1 && isLatest);
     info.li.querySelector('.contentRow-title').after(box);
+  }
+
+  // ---------- 保存 ----------
+  // 自動検索の結果・印・手元の版・DLsite の更新情報は Tampermonkey の保存領域に置く（AS と DLsite の両方のページから読めるように）。
+  // 1.6.0 までは AS のページのブラウザ保存領域（localStorage）にあったので、AS のページで初めて読むときに移す
+  const onAS = /(^|\.)anime-sharing\.com$/.test(location.hostname);
+  const onSearch = onAS && location.pathname.startsWith('/search');
+  const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+  function loadStore(key) {
+    if (hasGM) {
+      const v = GM_getValue(key, null);
+      if (v != null) return typeof v === 'string' ? JSON.parse(v) : v;
+    }
+    if (!onAS) return null;
+    let v = null;
+    try { v = JSON.parse(localStorage.getItem(key)); } catch { v = null; }
+    if (v != null && hasGM) GM_setValue(key, JSON.stringify(v));
+    return v;
+  }
+  function saveStore(key, v) {
+    const s = JSON.stringify(v);
+    if (hasGM) GM_setValue(key, s); else localStorage.setItem(key, s);
+  }
+
+  // 作品ごとの印 { 作品コード: { s: 'done'（確認済み）| 'skip'（見送り）, at } } と、
+  // 手元の版 { 作品コード: { v: '1.02', src: 'folder'（フォルダ名から）| 'hand'（手で入力） } }。
+  // 別のタブで書き換えられていても消さないよう、書くときは読み直してから1件だけ変える
+  const MARKS_KEY = 'apf-marks', LOCAL_KEY = 'apf-local';
+  const readMap = key => { try { return loadStore(key) || {}; } catch { return {}; } };
+  function updateMap(key, code, value) {
+    const m = readMap(key);
+    if (value == null) delete m[code]; else m[code] = value;
+    try { saveStore(key, m); } catch {}
+    return m;
   }
 
   // ---------- DLsite の更新情報（取得と保存） ----------
@@ -425,8 +519,8 @@
   const REV_DAYS = 7;
   const canFetchRev = typeof GM_xmlhttpRequest === 'function';
   let revStore;
-  try { revStore = JSON.parse(localStorage.getItem(REV_KEY)) || {}; } catch { revStore = {}; }
-  const saveRev = () => { try { localStorage.setItem(REV_KEY, JSON.stringify(revStore)); } catch {} };
+  try { revStore = loadStore(REV_KEY) || {}; } catch { revStore = {}; }
+  const saveRev = () => { try { saveStore(REV_KEY, revStore); } catch {} };
   // 保存済みの更新情報（古くても使う。なければ null）
   const cachedRevs = code => revStore[code]?.revs || null;
   const revFresh = code => !!revStore[code] && Date.now() - revStore[code].at < REV_DAYS * 86400000;
@@ -671,8 +765,6 @@
     refresh();
   }
 
-  init();
-
   // =====================================================================
   // 自動検索：作品コード（RJ番号など）を1件ずつ検索して、見つかったスレッドのURLを集める
   //   開き方: https://www.anime-sharing.com/search/#apf-auto            … パネルだけ開く
@@ -686,23 +778,51 @@
   const tabId = Math.random().toString(36).slice(2);
 
   let auto = loadAuto();
-  let running = false, stopReq = false, panel = null, panelView = 'found', lockTimer = null;
+  let running = false, stopReq = false, panel = null, panelView = 'unmarked', lockTimer = null;
 
   function loadAuto() {
     let a;
-    try { a = JSON.parse(localStorage.getItem(AUTO_KEY)); } catch { a = null; }
+    try { a = loadStore(AUTO_KEY); } catch { a = null; }
     // titles: { 作品コード: 作品名 }（作品名検索に使う。貼り付けで読み込む）
-    return Object.assign({ queue: [], results: {}, titles: {}, useTitles: true, interval: 8, staleDays: 30 }, a || {});
+    // lists: 検索するリスト。wish = 気になる（持っていない）作品、owned = 持っている作品（更新の確認用）。
+    //        queue は今選んでいるリスト（list）の中身
+    a = Object.assign({ queue: [], results: {}, titles: {}, useTitles: true, interval: 8, staleDays: 30, list: 'wish', lists: null }, a || {});
+    if (!a.lists) a.lists = { wish: a.queue, owned: [] };     // 1.6.0 までのリストは「気になる」にする
+    return a;
   }
   function saveAuto() {
-    try { localStorage.setItem(AUTO_KEY, JSON.stringify(auto)); }
-    catch (e) { autoMsg('保存に失敗しました（ブラウザの保存容量がいっぱいかもしれません）: ' + e.message); }
+    auto.lists[auto.list] = auto.queue;
+    try { saveStore(AUTO_KEY, auto); }
+    catch (e) { autoMsg('保存に失敗しました（保存容量がいっぱいかもしれません）: ' + e.message); }
   }
+
+  const LIST_NAMES = { wish: '気になる（持っていない）作品', owned: '持っている作品（更新の確認）' };
+  // 作品がどのリストに入っているか（持っている方を優先）
+  function listOf(code) {
+    if (auto.lists.owned.includes(code)) return 'owned';
+    if (auto.lists.wish.includes(code)) return 'wish';
+    return null;
+  }
+  const markOf = code => markActive(readMap(MARKS_KEY)[code], auto.results[code]);
+  const MARK_TEXT = { done: '✓ 確認済み', skip: '見送り' };
+  // 検索結果・フォーラム・スレッドのページで、作品コードの横に出す印（どのリストか・確認済み/見送り）
+  function workBadges(code) {
+    const out = [];
+    const l = listOf(code);
+    if (l === 'owned') out.push(badge('持っている', 'apf-own'));
+    else if (l === 'wish') out.push(badge('気になる', 'apf-wish'));
+    const m = markOf(code);
+    if (m) out.push(badge(MARK_TEXT[m], 'apf-old'));
+    return out;
+  }
+  // 手元の版（手で入れたものを優先）
+  const localOf = code => readMap(LOCAL_KEY)[code]?.v || '';
+  const CMP_TEXT = { newer: '新しい版あり', same: '手元と同じ版', older: '手元の方が新しい', unknown: '手元と比べられない' };
 
   // 裏のタブでも止まりにくい待ち時間（ブラウザは裏タブの setTimeout を1分おきまで遅らせることがあるため Worker を使う）
   let sleepWorker = null, sleepSeq = 0;
   const sleepWaits = new Map();
-  try {
+  if (onSearch) try {
     sleepWorker = new Worker(URL.createObjectURL(new Blob(
       ['onmessage=e=>setTimeout(()=>postMessage(e.data.id),e.data.ms)'], { type: 'text/javascript' })));
     sleepWorker.onmessage = e => { sleepWaits.get(e.data)?.(); sleepWaits.delete(e.data); };
@@ -856,12 +976,19 @@
             threads.push(...await searchTitle(kw, code, threads));
           }
           // バージョン番号と日付版が混ざっていたら、比べるために DLsite の更新情報を取る（取れなくても検索結果は残す）
+          // 手元の版と最新の版の種類が違う（バージョン番号と日付版）ときも、比べるために取る
           let revs = cachedRevs(code);
-          if (canFetchRev && !revFresh(code) && rankThreads(threads, revs).mixed) {
+          const rk0 = rankThreads(threads, revs);
+          const local = localOf(code);
+          const needRev = rk0.mixed || (parseLocalVersion(local) && rk0.latest && tier(rk0.latest) &&
+            compareLocal(local, rk0.latest, revs) === 'unknown');
+          if (canFetchRev && !revFresh(code) && needRev) {
             autoMsg(`${code} の DLsite 更新情報を取得中…`);
             try { revs = await getRevisions(code); } catch {}
           }
-          const changes = mergeChanges(prev?.changes, diffResults(prev, threads, revs));
+          const diff = diffResults(prev, threads, revs);
+          if (diff) diff.at = Date.now();     // 「確認済み」の印を、これより前に付けたものなら外すため
+          const changes = mergeChanges(prev?.changes, diff);
           auto.results[code] = Object.assign({ at: Date.now(), threads }, kw ? { keyword: kw } : {}, changes ? { changes } : {});
           floods = 0;
         } catch (e) {
@@ -899,21 +1026,30 @@
   const changeText = ch => [ch.newCount ? `新着${ch.newCount}件` : '', ch.latestChanged ? `最新が更新（${ch.from || 'なし'}→${ch.to}）` : '']
     .filter(Boolean).join(' ');
 
-  // 列：作品コード・種類・見つけ方・最新・バージョン・パッチ/翻訳・新着/更新・URL・タイトル
-  const TSV_HEAD = ['作品コード', '種類', '見つけ方', '最新', 'バージョン', 'パッチ/翻訳', '新着/更新', 'URL', 'タイトル'];
+  // 列：作品コード・種類・見つけ方・最新・バージョン・パッチ/翻訳・新着/更新・URL・タイトル・印・リスト・手元の版・手元と比べて
+  // （所持チェックの「ASの結果を読み込む」は見出しの名前で列を探す。後ろに列を足すのはかまわない）
+  const TSV_HEAD = ['作品コード', '種類', '見つけ方', '最新', 'バージョン', 'パッチ/翻訳', '新着/更新', 'URL', 'タイトル',
+    '印', 'リスト', '手元の版', '手元と比べて'];
   function exportRows(onlyFound, onlyLatest) {
     const lines = [];
-    const blank = (c, what) => [c, what, '', '', '', '', '', '', ''];
+    const marks = readMap(MARKS_KEY), locals = readMap(LOCAL_KEY);
+    const listName = { owned: '持っている', wish: '気になる' }[auto.list];
     for (const c of auto.queue) {
       const r = auto.results[c];
-      if (!r) { if (!onlyFound) lines.push(blank(c, '未検索')); continue; }
-      if (!r.threads.length) { if (!onlyFound) lines.push(blank(c, r.error ? 'エラー' : 'なし')); continue; }
+      const mk = markActive(marks[c], r);
+      const local = locals[c]?.v || '';
+      const tail = [mk ? MARK_TEXT[mk].replace('✓ ', '') : '', listName, local];
+      const blank = what => [c, what, '', '', '', '', '', '', '', ...tail, ''];
+      if (!r) { if (!onlyFound) lines.push(blank('未検索')); continue; }
+      if (!r.threads.length) { if (!onlyFound) lines.push(blank(r.error ? 'エラー' : 'なし')); continue; }
       const ch = r.changes ? changeText(r.changes) : '';
-      for (const t of rankThreads(r.threads, cachedRevs(c)).list) {
+      const revs = cachedRevs(c);
+      for (const t of rankThreads(r.threads, revs).list) {
         if (onlyLatest && !t.isLatest) continue;
         lines.push([c, t.kind === 'thread' ? 'スレッド' : '投稿内',
           t.hasCode ? 'コード' : t.byTitle ? '作品名' : 'そのほか', t.isLatest ? '★' : '',
-          t.version ? 'v' + t.version : t.dateVer || '', t.isPatch ? '○' : '', t.isLatest ? ch : '', t.url, t.title]);
+          t.version ? 'v' + t.version : t.dateVer || '', t.isPatch ? '○' : '', t.isLatest ? ch : '', t.url, t.title,
+          ...tail, t.isLatest && local ? CMP_TEXT[compareLocal(local, t, revs)] : '']);
       }
     }
     return lines;
@@ -958,6 +1094,9 @@
     .apf-auto .apf-weak{opacity:.6}
     .apf-auto .apf-msg{opacity:.85}
     .apf-auto .apf-new{background:#c2410c;color:#fff;border-color:#c2410c;font-weight:bold;white-space:normal}
+    .apf-auto .apf-mks{display:flex;gap:4px;margin-top:4px}
+    .apf-auto input.apf-local{width:7.5em;margin-top:4px;font-size:11px;padding:1px 4px}
+    .apf-auto tr.apf-marked td{opacity:.55}
   `;
 
   function el(tag, attrs, ...kids) {
@@ -984,33 +1123,55 @@
   }
 
   // 件数の集計（パネルの見出しと、検索中の部分更新で使う）
+  // 手元の版とASの最新を比べた結果（持っている作品のリストで使う）
+  function localCmp(code, local) {
+    const r = auto.results[code];
+    if (!local || !r?.threads.length) return null;
+    const revs = cachedRevs(code);
+    return compareLocal(local, rankThreads(r.threads, revs).latest, revs);
+  }
+
   function panelStats() {
     const total = auto.queue.length;
     const left = pending().length;
+    const marks = readMap(MARKS_KEY), locals = readMap(LOCAL_KEY);
+    const found = auto.queue.filter(c => auto.results[c]?.threads.length);
+    const staleMs = auto.staleDays * 86400000;
     return {
       total, left, done: total - left,
-      found: auto.queue.filter(c => auto.results[c]?.threads.length).length,
+      found: found.length,
       urls: auto.queue.reduce((n, c) => n + (auto.results[c]?.threads.length || 0), 0),
       errors: auto.queue.filter(c => auto.results[c]?.error).length,
       changed: auto.queue.filter(c => auto.results[c]?.changes).length,
+      // 見つかった作品のうち、「確認済み」「見送り」の印が付いていないもの
+      unmarked: found.filter(c => !markActive(marks[c], auto.results[c])).length,
+      // 前に検索してから日数がたって、もう一度検索する時期になった作品
+      stale: auto.queue.filter(c => { const r = auto.results[c]; return r && !r.error && Date.now() - r.at >= staleMs; }).length,
+      newer: auto.list === 'owned' ? auto.queue.filter(c => localCmp(c, locals[c]?.v) === 'newer').length : 0,
       etaMin: Math.ceil(left * (auto.interval + 1.5) / 60),
     };
   }
   const summaryText = s =>
-    `対象 ${s.total}件 ／ 検索済み ${s.done}件 ／ 見つかった作品 ${s.found}件（スレッド ${s.urls}件）` +
+    `対象 ${s.total}件 ／ 検索済み ${s.done}件 ／ 見つかった作品 ${s.found}件（スレッド ${s.urls}件・未確認 ${s.unmarked}件）` +
+    (s.newer ? ` ／ 手元より新しい版あり ${s.newer}件` : '') +
     (s.changed ? ` ／ 新着・更新あり ${s.changed}件` : '') +
-    (s.errors ? ` ／ エラー ${s.errors}件` : '') + (s.left ? ` ／ 残り ${s.left}件（約${s.etaMin}分）` : '');
+    (s.errors ? ` ／ エラー ${s.errors}件` : '') +
+    (s.stale ? ` ／ ${auto.staleDays}日たって再検索の時期 ${s.stale}件` : '') +
+    (s.left ? ` ／ 残り ${s.left}件（約${s.etaMin}分）` : '');
   const progWidth = s => `${s.total ? (s.done / s.total) * 100 : 0}%`;
 
   // 検索中は、件数・進み具合・結果の表だけを差し替える。
   // パネル全体を作り直すと、開いていた貼り付け欄が閉じたり、入力中の欄からフォーカスが外れたりするため
-  function refreshPanel() {
+  // force でないときは、手元の版を入力中なら表は差し替えない（入力中の文字が消えないように）
+  function refreshPanel(force = false) {
     const sum = panel?.querySelector('.apf-sum');
     if (!sum) { renderPanel(); return; }
     const s = panelStats();
     sum.textContent = summaryText(s);
     panel.querySelector('.apf-prog > div').style.width = progWidth(s);
-    panel.querySelector('.apf-res').replaceChildren(resultTable());
+    const res = panel.querySelector('.apf-res');
+    if (!force && res.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+    res.replaceChildren(resultTable());
   }
 
   // 貼り付け欄の開閉と、入力中の文字（パネルを作り直しても消えないように覚えておく）
@@ -1021,7 +1182,13 @@
     const s = panelStats();
     const { total, left, done, changed } = s;
     const titleCount = auto.queue.filter(c => auto.titles[c]).length;
-    const orphans = orphanCodes(auto.results, auto.queue, auto.titles);
+    // どちらのリストにも入っていない作品（片方のリストの結果は、もう片方を選んでいても消さない）
+    const other = auto.list === 'owned' ? 'wish' : 'owned';
+    const orphans = orphanCodes(auto.results, [...auto.queue, ...auto.lists[other]], auto.titles);
+
+    const listSel = el('select', { onchange: e => switchList(e.target.value) },
+      ...Object.entries(LIST_NAMES).map(([v, t]) => el('option', { value: v, ...(auto.list === v ? { selected: '' } : {}) },
+        `${t}（${(v === auto.list ? auto.queue : auto.lists[v]).length}件）`)));
 
     const startBtn = running
       ? el('button', { type: 'button', onclick: () => { stopReq = true; autoMsg('止めています…'); } }, '一時停止')
@@ -1054,12 +1221,18 @@
           if (n) autoMsg(`${msgText}（作品名 ${n}件も読み込みました）`);
         } }, 'このリストにする')));
 
+    const views = [['unmarked', '未確認の作品（見つかったもののうち印なし）'], ['found', '見つかった作品'], ['changed', '新着・更新あり'],
+      ...(auto.list === 'owned' ? [['newer', '手元より新しい版あり']] : []),
+      ['marked', '確認済み・見送り'], ['none', '見つからなかった作品'], ['todo', 'まだの作品'], ['all', 'すべて']];
+    if (!views.some(([v]) => v === panelView)) panelView = 'unmarked';
     const view = el('select', { onchange: e => { panelView = e.target.value; renderPanel(); } },
-      ...[['found', '見つかった作品'], ['changed', '新着・更新あり'], ['none', '見つからなかった作品'], ['todo', 'まだの作品'], ['all', 'すべて']]
-        .map(([v, t]) => el('option', { value: v, ...(panelView === v ? { selected: '' } : {}) }, t)));
+      ...views.map(([v, t]) => el('option', { value: v, ...(panelView === v ? { selected: '' } : {}) }, t)));
 
     panel.replaceChildren(
       el('h3', {}, '自動検索（作品コードで順番に検索）'),
+      el('div', { class: 'apf-row' }, el('label', {}, 'リスト ', listSel),
+        auto.list === 'owned' ? el('span', { class: 'apf-weak' },
+          '所持チェックの「持っている作品の更新をASで確認」で入ります。手元の版を入れると、ASの最新と比べます。') : null),
       el('div', { class: 'apf-row apf-sum' }, summaryText(s)),
       el('div', { class: 'apf-prog' }, el('div', { style: `width:${progWidth(s)}` })),
       el('div', { class: 'apf-row' },
@@ -1079,8 +1252,9 @@
         el('button', { type: 'button', onclick: saveTsv }, 'ファイルに保存（TSV）'),
         el('button', { type: 'button', onclick: () => {
           if (running) { autoMsg('止めてから押してください。'); return; }
-          if (!confirm('検索結果をすべて消して、最初から検索し直せるようにします。よろしいですか？')) return;
-          auto.results = {}; saveAuto(); renderPanel();
+          if (!confirm(`今のリスト（${LIST_NAMES[auto.list]}）の検索結果を消して、最初から検索し直せるようにします。よろしいですか？`)) return;
+          for (const c of auto.queue) delete auto.results[c];
+          saveAuto(); renderPanel();
         } }, '結果を消す'),
         changed ? el('button', { type: 'button', onclick: () => {
           for (const c of auto.queue) if (auto.results[c]) delete auto.results[c].changes;
@@ -1088,30 +1262,62 @@
         } }, '新着・更新の印を消す') : null,
         orphans.length ? el('button', { type: 'button', onclick: () => {
           if (running) { autoMsg('止めてから押してください。'); return; }
-          if (!confirm(`今の検索対象に入っていない ${orphans.length}件の検索結果と作品名を消します。よろしいですか？`)) return;
+          if (!confirm(`どちらのリストにも入っていない ${orphans.length}件の検索結果・作品名・印・手元の版を消します。よろしいですか？`)) return;
           for (const c of orphans) { delete auto.results[c]; delete auto.titles[c]; }
+          const marks = readMap(MARKS_KEY), locals = readMap(LOCAL_KEY);
+          for (const c of orphans) { delete marks[c]; delete locals[c]; }
+          try { saveStore(MARKS_KEY, marks); saveStore(LOCAL_KEY, locals); } catch {}
           saveAuto(); autoMsg(`${orphans.length}件の古い結果を消しました。`); renderPanel();
-        } }, `今のリストにない作品の結果を消す（${orphans.length}件）`) : null,
+        } }, `リストにない作品の結果を消す（${orphans.length}件）`) : null,
         el('label', {}, '表示 ', view)),
       el('div', { class: 'apf-msg' }, msgText),
       el('div', { class: 'apf-res' }, resultTable()));
   }
 
+  // 「確認済み」「見送り」のボタン。押した印をもう一度押すと外す
+  function markButtons(code, cur, after) {
+    const set = s => () => {
+      updateMap(MARKS_KEY, code, cur === s ? null : { s, at: Date.now() });
+      after();
+    };
+    return [
+      el('button', { type: 'button', class: 'apf-mk' + (cur === 'done' ? ' apf-on' : ''), title: '見終わった作品。新着・更新が付いたら自動で外れます', onclick: set('done') }, '確認済み'),
+      el('button', { type: 'button', class: 'apf-mk' + (cur === 'skip' ? ' apf-on' : ''), title: '入手しない作品。新着・更新が付いても外れません', onclick: set('skip') }, '見送り'),
+    ];
+  }
+
+  // 手元の版と最新の比べた結果のバッジ
+  function cmpBadge(cmp, local, latest) {
+    if (!cmp) return null;
+    const to = latest ? verLabel(latest) : '';
+    const text = cmp === 'newer' ? `${CMP_TEXT.newer}（手元 ${local} → ${to}）` : `${CMP_TEXT[cmp]}（手元 ${local}${to ? ' ／ 最新 ' + to : ''}）`;
+    return badge(text, cmp === 'newer' ? 'apf-cmp-newer' : 'apf-old');
+  }
+
   function resultTable() {
     const rows = [];
+    const marks = readMap(MARKS_KEY), locals = readMap(LOCAL_KEY);
+    const owned = auto.list === 'owned';
     for (const c of auto.queue) {
       const r = auto.results[c];
       const has = r?.threads.length > 0;
+      const mk = markActive(marks[c], r);
+      const local = locals[c]?.v || '';
+      const rk = has ? rankThreads(r.threads, cachedRevs(c)) : null;
+      const cmp = has && local ? compareLocal(local, rk.latest, cachedRevs(c)) : null;
       if (panelView === 'found' && !has) continue;
+      if (panelView === 'unmarked' && (!has || mk)) continue;
+      if (panelView === 'marked' && !mk) continue;
       if (panelView === 'changed' && !r?.changes) continue;
+      if (panelView === 'newer' && cmp !== 'newer') continue;
       if (panelView === 'none' && (!r || has)) continue;
       if (panelView === 'todo' && r && !r.error) continue;
-      const rk = has ? rankThreads(r.threads, cachedRevs(c)) : null;
       const cell = !r ? el('span', { class: 'apf-weak' }, 'まだ')
         : r.error ? el('span', {}, 'エラー: ' + r.error)
         : !has ? el('span', { class: 'apf-weak' }, 'なし')
         : rk.list.map(t => el('div', { class: 'apf-t' + (t.hasCode || t.byTitle ? '' : ' apf-weak') },
             t.isLatest ? latestBadge(rk) : null, t.isLatest ? ' ' : null,
+            t.isLatest && cmp ? cmpBadge(cmp, local, t) : null, t.isLatest && cmp ? ' ' : null,
             t.byTitle ? badge('作品名で見つかった（要確認）') : null, t.byTitle ? ' ' : null,
             el('a', { href: t.url, target: '_blank', rel: 'noopener' }, t.title), ' ',
             t.version ? badge('v' + t.version, 'apf-ver') : t.dateVer ? badge('日付版 ' + t.dateVer, 'apf-ver') : null, ' ',
@@ -1119,13 +1325,24 @@
             badge(t.kind === 'thread' ? 'スレッド' : '投稿内で言及'), ' ',
             t.posted ? badge(fmtDate(t.posted)) : null, ' ',
             t.forum ? badge(t.forum) : null));
-      rows.push(el('tr', {},
+      // 手元の版（持っている作品のリストでは、いつでも入れられるようにする）
+      const localBox = owned || local ? el('div', {},
+        el('input', { type: 'text', class: 'apf-local', value: local, placeholder: '手元の版',
+          title: '手元の版（1.02 / v1.02 / 23.11.13 / 2023-11-13 など）。空にすると消します',
+          onchange: e => {
+            const v = e.target.value.trim();
+            updateMap(LOCAL_KEY, c, v ? { v, src: 'hand' } : null);
+            refreshPanel(true);
+          } })) : null;
+      rows.push(el('tr', { class: mk ? 'apf-marked' : '' },
         el('td', { class: 'apf-code' },
           el('a', { href: dlsiteUrl(c), target: '_blank', rel: 'noopener noreferrer' }, c), el('br'),
           el('a', { href: `/search/search?keywords=${c}`, target: '_blank', class: 'apf-weak' }, 'ASで検索'),
           r ? el('div', { class: 'apf-weak' }, fmtDate(r.at / 1000)) : null,
           r?.changes ? el('div', {}, badge(changeText(r.changes), 'apf-new')) : null,
-          r?.keyword ? el('div', { class: 'apf-weak' }, '作品名でも検索した') : null),
+          r?.keyword ? el('div', { class: 'apf-weak' }, '作品名でも検索した') : null,
+          has || mk ? el('div', { class: 'apf-mks' }, markButtons(c, mk, () => refreshPanel(true))) : null,
+          localBox),
         el('td', {}, cell)));
     }
     if (!rows.length) return el('div', { class: 'apf-weak', style: 'margin-top:6px' }, '表示するものがありません。');
@@ -1144,13 +1361,40 @@
     }
     return out;
   }
-  function setQueue(codes) {
+  // 選んでいるリストを切り替える（それぞれのリストの中身は残る）
+  function switchList(name) {
+    if (running) { autoMsg('止めてから切り替えてください。'); renderPanel(); return false; }
+    if (name !== auto.list) {
+      auto.lists[auto.list] = auto.queue;
+      auto.list = name;
+      auto.queue = auto.lists[name] || [];
+      saveAuto();
+      autoMsg(`「${LIST_NAMES[name]}」のリストにしました（${auto.queue.length}件）。`);
+    }
+    renderPanel();
+    return true;
+  }
+  function setQueue(codes, list) {
     if (running) { autoMsg('止めてから入れ替えてください。'); return; }
+    if (list && list !== auto.list) { auto.lists[auto.list] = auto.queue; auto.list = list; }
     auto.queue = codes;
     saveAuto();
     const left = pending().length;
-    autoMsg(`${codes.length}件を読み込みました（そのうち検索が必要なのは ${left}件）。「開始」を押すと検索します。`);
+    autoMsg(`「${LIST_NAMES[auto.list]}」に ${codes.length}件を読み込みました（そのうち検索が必要なのは ${left}件）。「開始」を押すと検索します。`);
     renderPanel();
+  }
+
+  // 所持チェックから渡された、フォルダ名から読んだ手元の版を入れる。手で入れた版は上書きしない。
+  // フォルダ名から版が読めなくなった作品は、前にフォルダ名から入れた版を消す
+  function setFolderVersions(codes, versions) {
+    const m = readMap(LOCAL_KEY);
+    for (const c of codes) {
+      if (m[c]?.src === 'hand') continue;
+      if (versions[c]) m[c] = { v: versions[c], src: 'folder' };
+      else if (m[c]?.src === 'folder') delete m[c];
+    }
+    try { saveStore(LOCAL_KEY, m); } catch {}
+    return Object.keys(versions).length;
   }
 
   function openPanel() {
@@ -1163,22 +1407,114 @@
       const host = document.querySelector('.p-body-pageContent') || document.querySelector('.p-body-main') || document.body;
       host.prepend(panel);
     }
-    const m = location.hash.match(/^#apf-auto=(.*)$/);
+    const m = location.hash.match(/^#apf-(auto|owned)=(.*)$/);
     if (m) {
-      const codes = importCodes(decodeURIComponent(m[1]));
       history.replaceState(null, '', location.pathname + location.search + '#apf-auto');
-      if (codes.length) { setQueue(codes); return; }
+      if (m[1] === 'owned') {
+        const o = parseOwnedList(decodeURIComponent(m[2]));
+        if (o.codes.length) {
+          const n = running ? 0 : setFolderVersions(o.codes, o.versions);
+          setQueue(o.codes, 'owned');
+          if (!running) autoMsg(`${msgText}（フォルダ名から手元の版を ${n}件 読み取りました）`);
+          return;
+        }
+      } else {
+        const codes = importCodes(decodeURIComponent(m[2]));
+        if (codes.length) { setQueue(codes, 'wish'); return; }
+      }
     }
     renderPanel();
+    // 前に検索してから日数がたった作品があれば知らせる
+    const s = panelStats();
+    if (!running && s.stale && !msgText) {
+      autoMsg(`前の検索から${auto.staleDays}日以上たった作品が ${s.stale}件あります。「開始」で検索し直すと、新着・更新がわかります。`);
+    }
   }
 
-  function checkHash() { if (location.hash.startsWith('#apf-auto')) openPanel(); }
-  window.addEventListener('hashchange', checkHash);
-  checkHash();
+  // ---------- AS のフォーラム・スレッドのページ：持っている／気になる作品に印を付ける ----------
+  function markForumPage() {
+    addStyle();
+    const codeIn = (...ss) => { for (const s of ss) { const c = s && parseCode(s); if (c) return c; } return null; };
+    const safeDecode = s => { try { return decodeURIComponent(s); } catch { return s; } };
+    // スレッドの一覧
+    for (const item of document.querySelectorAll('.structItem--thread')) {
+      const t = item.querySelector('.structItem-title');
+      const a = t?.querySelector('a[href^="/threads/"]');
+      if (!t || !a || t.querySelector('.apf-fb')) continue;
+      const code = codeIn(a.textContent, item.querySelector('a.thread-thumbnail-link')?.title, safeDecode(a.getAttribute('href')));
+      const bs = code ? workBadges(code) : [];
+      if (bs.length) t.append(el('span', { class: 'apf-fb' }, ' ', ...bs));
+    }
+    // スレッドのページ：見出しの横に印と、「確認済み」「見送り」のボタン
+    const h1 = document.querySelector('h1.p-title-value');
+    if (h1 && !document.querySelector('.apf-fb-thread')) {
+      const code = codeIn(h1.textContent, safeDecode(location.pathname));
+      if (!code || (!listOf(code) && !auto.results[code])) return;
+      const box = el('div', { class: 'apf-fb-thread apf-badges' });
+      const draw = () => box.replaceChildren(...workBadges(code), ...markButtons(code, markOf(code), draw));
+      draw();
+      h1.after(box);
+    }
+  }
 
-  // 整理バーからも開けるようにする
-  const bar = document.querySelector('.apf-bar');
-  if (bar) {
-    bar.querySelector('.apf-status').before(el('button', { type: 'button', onclick: () => { location.hash = 'apf-auto'; } }, '自動検索…'));
+  // ---------- DLsite の作品ページ：ASの検索結果を出す ----------
+  const dlsiteCss = `
+    .apf-dl{position:fixed;right:12px;bottom:12px;z-index:2147483000;max-width:420px;padding:8px 10px;
+      background:#fff;color:#111;border:1px solid #9ca3af;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.25);
+      font:12px/1.6 system-ui,"Yu Gothic UI",sans-serif}
+    .apf-dl a{color:#1d4ed8;word-break:break-all}
+    .apf-dl .apf-dl-head{display:flex;gap:6px;align-items:center;font-weight:bold;margin-bottom:4px}
+    .apf-dl .apf-dl-x{margin-left:auto;cursor:pointer;border:0;background:transparent;font-size:16px;line-height:1;color:inherit}
+    .apf-dl .apf-weak{opacity:.65}
+    .apf-dl .apf-new{background:#c2410c;color:#fff;border-color:#c2410c;font-weight:bold}
+  `;
+  function showDlsiteBox() {
+    const m = location.pathname.match(/product_id\/((?:RJ|VJ|BJ|RE)\d{6,8})/i);
+    if (!m) return;
+    const code = m[1].toUpperCase();
+    const r = auto.results[code];
+    // どちらのリストにも入っておらず、検索もしていない作品では何も出さない
+    if (!listOf(code) && !r) return;
+    addStyle();
+    const s = document.createElement('style');
+    s.textContent = dlsiteCss;
+    document.head.appendChild(s);
+    const mk = markOf(code), local = localOf(code);
+    const revs = cachedRevs(code);
+    const rk = r?.threads.length ? rankThreads(r.threads, revs) : null;
+    const t = rk?.latest;
+    const box = el('div', { class: 'apf-dl' },
+      el('div', { class: 'apf-dl-head' }, 'AS Patch Finder', ...workBadges(code),
+        el('button', { type: 'button', class: 'apf-dl-x', title: '閉じる', onclick: () => box.remove() }, '×')),
+      !r ? el('div', {}, 'まだASで検索していません。')
+        : r.error ? el('div', {}, `前回の検索はエラーでした（${fmtDate(r.at / 1000)}）。`)
+        : !rk ? el('div', {}, `ASで見つかりませんでした（${fmtDate(r.at / 1000)}に検索）。`)
+        : el('div', {}, `ASのスレッド ${r.threads.length}件（${fmtDate(r.at / 1000)}に検索）`),
+      r?.changes ? el('div', {}, badge(changeText(r.changes), 'apf-new')) : null,
+      t ? el('div', {}, '最新: ', el('a', { href: t.url, target: '_blank', rel: 'noopener noreferrer' }, t.title), ' ',
+        t.version ? badge('v' + t.version, 'apf-ver') : t.dateVer ? badge('日付版 ' + t.dateVer, 'apf-ver') : null, ' ',
+        t.isPatch ? badge('パッチ/翻訳') : null) : null,
+      t && local ? el('div', {}, cmpBadge(compareLocal(local, t, revs), local, t)) : null,
+      !t && local ? el('div', { class: 'apf-weak' }, `手元の版: ${local}`) : null,
+      el('div', {}, el('a', { href: `https://www.anime-sharing.com/search/search?keywords=${code}`, target: '_blank', rel: 'noopener noreferrer' }, 'ASで検索'),
+        el('span', { class: 'apf-weak' }, mk ? `　${MARK_TEXT[mk]}` : '')));
+    document.body.appendChild(box);
+  }
+
+  // ---------- 起動 ----------
+  if (onSearch) {
+    init();
+    const checkHash = () => { if (/^#apf-(auto|owned)/.test(location.hash)) openPanel(); };
+    window.addEventListener('hashchange', checkHash);
+    checkHash();
+    // 整理バーからも開けるようにする
+    const bar = document.querySelector('.apf-bar');
+    if (bar) {
+      bar.querySelector('.apf-status').before(el('button', { type: 'button', onclick: () => { location.hash = 'apf-auto'; } }, '自動検索…'));
+    }
+  } else if (onAS) {
+    markForumPage();
+  } else if (/(^|\.)dlsite\.com$/.test(location.hostname)) {
+    showDlsiteBox();
   }
 })();
