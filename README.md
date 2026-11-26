@@ -66,6 +66,11 @@ C:\Windows\System32\conhost.exe --headless powershell.exe -NoProfile -ExecutionP
 
 https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
 
+### 検索結果の整理
+
+- RJ番号で検索すると、そのRJ番号の結果を1つの作品グループにまとめます。タイトルにRJ番号がなく本文だけで当たったスレッドも同じグループに入り、「本文だけで一致」が付きます。これらは最新の候補にはしません（1.5.6〜）
+- リクエストスレッド（リクエスト用のフォーラムにあるもの、タイトルが [REQUEST] で始まるもの）は、「リクエストを隠す」で隠せます。初期設定は隠す、です。リクエストは最新の候補にしません（自動検索でも同じ）（1.5.6〜）
+
 ### 自動検索（1.3.0〜）
 
 RJ番号のリストを1件ずつASで検索して、見つかったスレッドのURLを集めます。

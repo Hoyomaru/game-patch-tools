@@ -13,7 +13,7 @@ const start = src.indexOf('// ---------- 解析 ----------');
 const end = src.indexOf('// ---------- 表示 ----------');
 assert.ok(start >= 0 && end > start, '解析／表示の印が見つかりません');
 const apf = new Function(src.slice(start, end) +
-  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, orphanCodes, titleKeyword, titleMatches, codeOf };')();
+  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, orphanCodes, titleKeyword, titleMatches, codeOf, isRequest, orderGroup };')();
 
 const T = (title, extra = {}) => Object.assign({ title, url: 'https://example.invalid/' + encodeURIComponent(title), hasCode: true, posted: 0, kind: 'thread' }, extra);
 const info = (title, posted = 0) => {
@@ -38,6 +38,10 @@ test('バージョンの読み取り', () => {
     ['Game [r102652]', '102652', null],
     ['Game v2', '2', null],
     ['Game Ver26.11.08', null, '2026-11-08'],
+    ['Game (Ver0.23.9.26) + patch.1', null, '2023-09-26'],   // 「0.」付きの日付版
+    ['Game v0.23.11.13', null, '2023-11-13'],
+    ['Game v0.2.3.4', '0.2.3.4', null],                     // 年が2桁でなければ普通のバージョン
+    ['Game v0.99.1.2', '0.99.1.2', null],                   // 年としてありえなければ普通のバージョン
     ['Game v26-11-08', null, '2026-11-08'],
     ['Game Ver2026.11.08', null, '2026-11-08'],
     ['Game v261108', null, '2026-11-08'],
@@ -164,4 +168,25 @@ test('作品コードはタイトル・URL・切れたタイトルから決め�
   assert.equal(apf.codeOf('Some long title [RJ012345...', '/threads/some-long-title.123/', ['RJ01234567']), 'RJ01234567');
   assert.equal(apf.codeOf('Some long title [RJ01...', '/threads/some-long-title.123/', ['RJ01234567']), null);
   assert.equal(apf.codeOf('Game v1.0 English', '/threads/game-v1-0-english.123/'), null);
+});
+
+test('リクエストスレッドの見分け', () => {
+  assert.ok(apf.isRequest('[REQUEST][RJ01234567]ふしぎな森の冒険'));
+  assert.ok(apf.isRequest('Request: Some Game'));
+  assert.ok(apf.isRequest('ふしぎな森の冒険', 'Hentai Games Request'));
+  assert.ok(!apf.isRequest('[RJ01234567] ふしぎな森の冒険 v1.0', 'Hentai Games'));
+});
+
+test('作品グループの最新は、リクエストと本文だけで当たったものを候補にしない', () => {
+  const R = (title, extra = {}) => Object.assign(info(title), extra);
+  const code = R('[RJ01234567] Game v1.0');
+  const weak = R('Game v2.0 English', { weak: true });
+  const req = R('[REQUEST][RJ01234567] Game v3.0', { isRequest: true });
+  const o = apf.orderGroup([weak, req, code]);
+  assert.equal(o.latest, code);
+  assert.deepEqual(o.list, [code, req, weak]);
+  // コードありが無ければ、本文だけで当たったものから選ぶ
+  assert.equal(apf.orderGroup([weak, req]).latest, weak);
+  // リクエストしかなければ最新なし
+  assert.equal(apf.orderGroup([req]).latest, null);
 });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.5.5
+// @version      1.5.6
 // @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
 // @icon         https://www.anime-sharing.com/styles/io/images/favicon.png
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
@@ -33,13 +33,16 @@
   // 日付形式のバージョン：Ver26.11.08 / v26-11-08 / Ver2026.11.08 / v261108 / v20261108
   const DATE_VER_RE = new RegExp(
     `${VER_PREFIX}(?:(20\\d{2}|\\d{2})([._\\-/])(\\d{1,2})\\2(\\d{1,2})|(20\\d{2}|\\d{2})(\\d{2})(\\d{2}))(?![\\w.])`, 'i');
+  // 先頭に「0.」を付けた日付形式のバージョン：Ver0.23.9.26（月日は1桁のこともある）
+  const DATE_VER0_RE = new RegExp(`${VER_PREFIX}0\\.(\\d{2})\\.(\\d{1,2})\\.(\\d{1,2})(?![\\w.])`, 'i');
 
   const THIS_YEAR = new Date().getFullYear();
 
   // 年月日として妥当なら 'YYYY-MM-DD'、違えば null。
   // 2桁の年は月日も2桁のときだけ日付とみなす（v10.2.3 のような普通のバージョンを日付と取り違えないため）。
-  function ymd(y, mo, d) {
-    if (y.length === 2 && (mo.length !== 2 || d.length !== 2)) return null;
+  // loose なら月日が1桁でもよい（「0.」付きで日付だとわかるとき）
+  function ymd(y, mo, d, loose = false) {
+    if (!loose && y.length === 2 && (mo.length !== 2 || d.length !== 2)) return null;
     const yy = y.length === 2 ? 2000 + Number(y) : Number(y);
     const m = Number(mo), dd = Number(d);
     if (yy < 2010 || yy > THIS_YEAR + 1 || m < 1 || m > 12 || dd < 1 || dd > 31) return null;
@@ -51,6 +54,11 @@
     let m = title.match(DATE_VER_RE);
     if (m) {
       const dv = m[1] ? ymd(m[1], m[3], m[4]) : ymd(m[5], m[6], m[7]);
+      if (dv) return { version: null, dateVer: dv };
+    }
+    m = title.match(DATE_VER0_RE);
+    if (m) {
+      const dv = ymd(m[1], m[2], m[3], true);
       if (dv) return { version: null, dateVer: dv };
     }
     m = title.match(VER_RE);
@@ -89,6 +97,23 @@
     return parseCode(title) || parseCode(href) || known.find(c => cutCode(title, c)) || null;
   }
 
+  // リクエストスレッド：リクエスト用のフォーラム（Hentai Games Request など）にあるか、タイトルが [REQUEST] などで始まる
+  function isRequest(title, forum = '') {
+    return /request/i.test(forum) || /^\s*(?:[\[(【]\s*)?request\b/i.test(title);
+  }
+
+  // 1作品グループの並びと最新を決める。
+  //   最新の候補は、リクエストでなく、タイトルかURLに作品コードがあるもの（なければ本文だけで当たったもの）。
+  //   候補を新しい順に並べ、残り（本文だけで当たったもの・リクエスト）はその後ろに新しい順で並べる
+  function orderGroup(g) {
+    const ok = g.filter(r => !r.isRequest);
+    const strong = ok.filter(r => !r.weak);
+    const cands = strong.length ? strong : ok;
+    const sorted = [...cands].sort((a, b) => newer(b, a));
+    const rest = g.filter(r => !cands.includes(r)).sort((a, b) => newer(b, a));
+    return { list: [...sorted, ...rest], latest: sorted[0] || null, basis: decidedBy(sorted[0], sorted[1]) };
+  }
+
   function baseTitle(title) {
     return title
       .replace(/\[[^\]]*\]|\([^)]*\)|【[^】]*】/g, ' ')
@@ -122,6 +147,7 @@
     const title = a.textContent.replace(/\s+/g, ' ').trim();
     const time = li.querySelector('time[data-timestamp]');
     const tags = [...li.querySelectorAll('.tagItem')].map(t => t.textContent.trim()).join(' ');
+    const forum = li.querySelector('.contentRow-minor a[href^="/forums/"]')?.textContent.trim() || '';
     const pv = parseVersion(title);
     const dates = parseDates(title);
     if (pv.dateVer) dates.push(pv.dateVer), dates.sort();
@@ -135,6 +161,7 @@
       code: codeOf(title, a.getAttribute('href') || ''),
       posted: time ? Number(time.dataset.timestamp) : 0,
       isPatch: PATCH_RE.test(title) || PATCH_RE.test(tags),
+      isRequest: isRequest(title, forum),
       origIndex: Number(li.dataset.apfIndex ?? 0),
     };
     info.lastDate = info.dates[info.dates.length - 1] || null;
@@ -185,18 +212,18 @@
     if (pv.dateVer && !dates.includes(pv.dateVer)) dates.push(pv.dateVer), dates.sort();
     return Object.assign({}, t, {
       version: pv.version, dateVer: pv.dateVer, lastDate: dates[dates.length - 1] || null,
-      isPatch: PATCH_RE.test(t.title), isLatest: false,
+      isPatch: PATCH_RE.test(t.title), isRequest: isRequest(t.title, t.forum), isLatest: false,
     });
   }
 
   // 1作品分のスレッドを並べ、最新を決める。
-  //   最新の候補はタイトルにコードがあるもの（1件もなければ、作品名で見つかったもの）。
+  //   最新の候補はタイトルにコードがあるもの（1件もなければ、作品名で見つかったもの）。リクエストスレッドは候補にしない。
   //   その中にパッチ/翻訳があれば、パッチ/翻訳だけで比べる。
   //   並び：最新 → コードあり → 作品名で見つかった → そのほか（それぞれ新しい順）
   function rankThreads(threads) {
     const list = threads.map(threadInfo);
-    const withCode = list.filter(t => t.hasCode);
-    const byTitle = withCode.length ? [] : list.filter(t => t.byTitle);
+    const withCode = list.filter(t => t.hasCode && !t.isRequest);
+    const byTitle = withCode.length ? [] : list.filter(t => t.byTitle && !t.isRequest);
     const pool = withCode.length ? withCode : byTitle;
     const patches = pool.filter(t => t.isPatch);
     const cands = patches.length ? patches : pool;
@@ -324,9 +351,11 @@
     info.li.querySelector('.apf-badges')?.remove();
     const box = document.createElement('div');
     box.className = 'apf-badges';
-    if (groupSize > 1) {
+    if (info.isRequest) box.appendChild(badge('リクエスト', 'apf-old'));
+    else if (groupSize > 1) {
       if (isLatest) box.appendChild(badge(`★ 最新（${groupSize}件中・${basis}で判定）`, 'apf-latest'));
-      else if (tier(info) < tier(latest)) box.appendChild(badge('版不明（最新と比べられない）', 'apf-old'));
+      else if (info.weak) box.appendChild(badge('本文だけで一致（タイトルにコードなし）', 'apf-old'));
+      else if (latest && tier(info) < tier(latest)) box.appendChild(badge('版不明（最新と比べられない）', 'apf-old'));
       else box.appendChild(badge('旧版', 'apf-old'));
     }
     if (info.version) box.appendChild(badge('v' + info.version, 'apf-ver'));
@@ -343,7 +372,7 @@
   // ---------- メイン ----------
   let list, rows = [], state;
   try { state = JSON.parse(localStorage.getItem('apf-state')) || {}; } catch { state = {}; }
-  state = Object.assign({ sort: 'group', dim: true, hideOld: false, filter: '' }, state);
+  state = Object.assign({ sort: 'group', dim: true, hideOld: false, hideReq: true, filter: '' }, state);
   const save = () => { try { localStorage.setItem('apf-state', JSON.stringify(state)); } catch {} };
 
   // 検索語に入っている作品コード（RJ番号で検索したときなど）
@@ -359,25 +388,34 @@
       return analyze(li);
     }).filter(Boolean);
     // 途中で切れたタイトルは、ほかの結果や検索語のコードと照らして同じ作品にまとめる
-    const known = [...new Set([...queryCodes(), ...rows.map(r => r.code).filter(Boolean)])];
+    const qc = queryCodes();
+    const known = [...new Set([...qc, ...rows.map(r => r.code).filter(Boolean)])];
     for (const r of rows) {
       if (r.code) continue;
       const c = codeOf(r.title, r.href, known);
-      if (c) { r.code = c; r.group = c; }
+      if (c) { r.code = c; r.group = c; r.weak = false; }
+      // 作品コード1つで検索したとき、タイトルにもURLにもコードがない結果は本文で当たったもの。
+      // 作品名の書き方の違いで別グループに分かれないよう、検索したコードのグループに入れる（最新の候補にはしない）
+      else if (qc.length === 1) { r.group = qc[0]; r.weak = true; }
     }
   }
 
   function refresh() {
     // グループごとに最新を判定
+    // 「リクエストを隠す」ときは、リクエストスレッドを作品グループに数えない
     const groups = new Map();
     for (const r of rows) {
+      if (state.hideReq && r.isRequest) {
+        r.isLatest = false; r.groupSize = 1; renderBadges(r, 1, false, '', null);
+        continue;
+      }
       if (!groups.has(r.group)) groups.set(r.group, []);
       groups.get(r.group).push(r);
     }
-    for (const g of groups.values()) {
-      g.sort((a, b) => newer(b, a));
-      const basis = decidedBy(g[0], g[1]);
-      g.forEach((r, i) => { r.isLatest = i === 0; r.groupSize = g.length; renderBadges(r, g.length, i === 0, basis, g[0]); });
+    for (const [k, g] of groups) {
+      const o = orderGroup(g);
+      groups.set(k, o.list);
+      o.list.forEach(r => { r.isLatest = r === o.latest; r.groupSize = g.length; renderBadges(r, g.length, r.isLatest, o.basis, o.latest); });
     }
 
     // 並べ替え
@@ -392,12 +430,13 @@
         if (g.length > 1) {
           const head = document.createElement('li');
           head.className = 'apf-group-head';
-          head.textContent = `▼ ${g[0].code || g[0].title.slice(0, 60)}　— ${g.length}件`;
+          head.textContent = `▼ ${g.find(r => r.code)?.code || g[0].title.slice(0, 60)}　— ${g.length}件`;
           head._apfGroup = g;
           ordered.push(head);
         }
         ordered.push(...g.map(r => r.li));
       }
+      ordered.push(...rows.filter(r => state.hideReq && r.isRequest).map(r => r.li));
     } else if (state.sort === 'version') {
       ordered = [...rows].sort((a, b) => newer(b, a)).map(r => r.li);
     } else if (state.sort === 'posted') {
@@ -412,7 +451,7 @@
     let shown = 0;
     for (const r of rows) {
       const hit = !q || r.title.toLowerCase().includes(q);
-      const hide = !hit || (state.hideOld && r.groupSize > 1 && !r.isLatest);
+      const hide = !hit || (state.hideReq && r.isRequest) || (state.hideOld && r.groupSize > 1 && !r.isLatest);
       r.li.classList.toggle('apf-hidden', hide);
       r.li.classList.toggle('apf-dim', !hide && state.dim && !r.isPatch);
       if (!hide) shown++;
@@ -420,7 +459,9 @@
     list.querySelectorAll('.apf-group-head').forEach(h => {
       h.classList.toggle('apf-hidden', h._apfGroup.every(r => r.li.classList.contains('apf-hidden')));
     });
-    status(`${rows.length}件中 ${shown}件を表示 ／ 作品グループ ${groups.size}`);
+    const reqs = rows.filter(r => r.isRequest).length;
+    status(`${rows.length}件中 ${shown}件を表示 ／ 作品グループ ${groups.size}` +
+      (reqs ? ` ／ リクエスト ${reqs}件${state.hideReq ? '（非表示）' : ''}` : ''));
   }
 
   let statusEl;
@@ -476,6 +517,7 @@
       </label>
       <label><input type="checkbox" data-k="dim"> パッチ以外を薄く</label>
       <label><input type="checkbox" data-k="hideOld"> 旧版を隠す</label>
+      <label><input type="checkbox" data-k="hideReq"> リクエストを隠す</label>
       <input type="text" data-k="filter" placeholder="タイトル内を絞り込み">
       <button type="button" data-act="more">残りのページも読み込む</button>
       <span class="apf-status"></span>`;
@@ -483,6 +525,7 @@
     bar.querySelector('[data-k=sort]').value = state.sort;
     bar.querySelector('[data-k=dim]').checked = state.dim;
     bar.querySelector('[data-k=hideOld]').checked = state.hideOld;
+    bar.querySelector('[data-k=hideReq]').checked = state.hideReq;
     bar.querySelector('[data-k=filter]').value = state.filter;
     bar.addEventListener('input', e => {
       const k = e.target.dataset.k;
