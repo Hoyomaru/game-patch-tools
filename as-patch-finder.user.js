@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.5.3
+// @version      1.5.4
 // @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
 // @updateURL    https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
@@ -76,8 +76,16 @@
   }
 
   function parseCode(title) {
-    const m = title.match(/\b(RJ|VJ|BJ|RE)(\d{6,8})\b/i);
+    // 「[RJ012345...」のように途中で切れたものは別のコードに見えるので読まない（切れたものは codeOf で扱う）
+    const m = title.match(/\b(RJ|VJ|BJ|RE)(\d{6,8})\b(?!\.\.\.|…)/i);
     return m ? (m[1] + m[2]).toUpperCase() : null;
+  }
+
+  // 作品コードを決める。タイトルになければスレッドのURL（/threads/rj01234567-… のような部分）、
+  // それでもなければ「… [RJ012345...」と途中で切れたタイトルを、ほかの結果や検索語のコード（known）と照らす。
+  // タイトルだけで決めると、同じ作品のスレッドが別の作品として分かれてしまうため
+  function codeOf(title, href = '', known = []) {
+    return parseCode(title) || parseCode(href) || known.find(c => cutCode(title, c)) || null;
   }
 
   function baseTitle(title) {
@@ -122,7 +130,8 @@
       version: pv.version,
       dateVer: pv.dateVer,
       dates,
-      code: parseCode(title),
+      href: a.getAttribute('href') || '',
+      code: codeOf(title, a.getAttribute('href') || ''),
       posted: time ? Number(time.dataset.timestamp) : 0,
       isPatch: PATCH_RE.test(title) || PATCH_RE.test(tags),
       origIndex: Number(li.dataset.apfIndex ?? 0),
@@ -336,11 +345,25 @@
   state = Object.assign({ sort: 'group', dim: true, hideOld: false, filter: '' }, state);
   const save = () => { try { localStorage.setItem('apf-state', JSON.stringify(state)); } catch {} };
 
+  // 検索語に入っている作品コード（RJ番号で検索したときなど）
+  function queryCodes() {
+    const p = new URLSearchParams(location.search);
+    const q = [p.get('q'), p.get('keywords'), document.querySelector('input[name=keywords]')?.value].filter(Boolean).join(' ');
+    return (q.match(/\b(?:RJ|VJ|BJ|RE)\d{6,8}\b/gi) || []).map(c => c.toUpperCase());
+  }
+
   function collect() {
     rows = [...list.querySelectorAll(ROW_SEL)].map((li, i) => {
       if (li.dataset.apfIndex == null) li.dataset.apfIndex = String(i);
       return analyze(li);
     }).filter(Boolean);
+    // 途中で切れたタイトルは、ほかの結果や検索語のコードと照らして同じ作品にまとめる
+    const known = [...new Set([...queryCodes(), ...rows.map(r => r.code).filter(Boolean)])];
+    for (const r of rows) {
+      if (r.code) continue;
+      const c = codeOf(r.title, r.href, known);
+      if (c) { r.code = c; r.group = c; }
+    }
   }
 
   function refresh() {

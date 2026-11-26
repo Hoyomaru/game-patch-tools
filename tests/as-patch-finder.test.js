@@ -13,7 +13,7 @@ const start = src.indexOf('// ---------- 解析 ----------');
 const end = src.indexOf('// ---------- 表示 ----------');
 assert.ok(start >= 0 && end > start, '解析／表示の印が見つかりません');
 const apf = new Function(src.slice(start, end) +
-  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, orphanCodes, titleKeyword, titleMatches };')();
+  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, orphanCodes, titleKeyword, titleMatches, codeOf };')();
 
 const T = (title, extra = {}) => Object.assign({ title, url: 'https://example.invalid/' + encodeURIComponent(title), hasCode: true, posted: 0, kind: 'thread' }, extra);
 const info = (title, posted = 0) => {
@@ -156,4 +156,12 @@ test('作品名検索の当たり判定', () => {
   assert.ok(apf.titleMatches('[RJ00000000] ふしぎな森の冒険 v1.0 English', 'ふしぎな森の冒険'));
   assert.ok(apf.titleMatches('Full-Width Title v2', 'Full Width Title'));
   assert.ok(!apf.titleMatches('まったく別の作品', 'ふしぎな森の冒険'));
+});
+
+test('作品コードはタイトル・URL・切れたタイトルから決める', () => {
+  assert.equal(apf.codeOf('[RJ01234567] Game v1.0'), 'RJ01234567');
+  assert.equal(apf.codeOf('Game v1.0 English', '/threads/rj01234567-game-v1-0-english.123/'), 'RJ01234567');
+  assert.equal(apf.codeOf('Some long title [RJ012345...', '/threads/some-long-title.123/', ['RJ01234567']), 'RJ01234567');
+  assert.equal(apf.codeOf('Some long title [RJ01...', '/threads/some-long-title.123/', ['RJ01234567']), null);
+  assert.equal(apf.codeOf('Game v1.0 English', '/threads/game-v1-0-english.123/'), null);
 });
