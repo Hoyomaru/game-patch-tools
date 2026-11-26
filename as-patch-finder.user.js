@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AS Patch Finder（検索結果のバージョン整理）
 // @namespace    local.patch-finder
-// @version      1.5.6
+// @version      1.6.0
 // @description  検索結果のタイトルからバージョン・作品コード・更新日を抜き出し、作品ごとにまとめて最新版をハイライトします。作品コードのリストを順番に自動検索して、見つかったスレッドのURLを集めることもできます。
 // @icon         https://www.anime-sharing.com/styles/io/images/favicon.png
 // @homepageURL  https://github.com/Hoyomaru/game-patch-tools
@@ -9,7 +9,8 @@
 // @downloadURL  https://raw.githubusercontent.com/Hoyomaru/game-patch-tools/main/as-patch-finder.user.js
 // @match        https://www.anime-sharing.com/search/*
 // @match        https://anime-sharing.com/search/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      www.dlsite.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -111,7 +112,7 @@
     const cands = strong.length ? strong : ok;
     const sorted = [...cands].sort((a, b) => newer(b, a));
     const rest = g.filter(r => !cands.includes(r)).sort((a, b) => newer(b, a));
-    return { list: [...sorted, ...rest], latest: sorted[0] || null, basis: decidedBy(sorted[0], sorted[1]) };
+    return { list: [...sorted, ...rest], latest: sorted[0] || null, basis: decidedBy(sorted[0], sorted[1]), mixed: isMixed(cands) };
   }
 
   function baseTitle(title) {
@@ -175,12 +176,61 @@
   const tier = r => (r.version ? 2 : r.dateVer ? 1 : 0);
   const cmpStr = (a, b) => (a === b ? 0 : a < b ? -1 : 1);
 
+  // ---- DLsite の更新情報 ----
+  // 作品ページの「更新情報」と同じもの（/api/product/maniax/fetchRevision）の list を、
+  // { date: 'YYYY-MM-DD', version: '1.0.3' | null } の配列（新しい順）にする。
+  // 版の番号は、更新内容の文章に「Ver1.0.3に更新」「バージョンを1.0.0から1.0.1へ」のように書いてあるときだけ読める
+  const REV_VER_RE = /(?:\bver(?:sion)?\.?\s*|バージョン\s*(?:を|が|は)?\s*)(\d+(?:\.\d+)+)|(\d+(?:\.\d+)+)\s*(?:へ|に)\s*(?:更新|アップデート|変更)/gi;
+  function parseRevisions(list) {
+    const out = [];
+    for (const r of list || []) {
+      const m = String(r.release_date || '').match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+      const date = m && ymd(m[1], m[2], m[3]);
+      if (!date) continue;
+      let version = null;
+      for (const v of String(r.info || '').normalize('NFKC').matchAll(REV_VER_RE)) {
+        const x = v[1] || v[2];
+        if (!version || cmpVersion(x, version) > 0) version = x;   // 「1.0.0から1.0.1へ」は大きい方
+      }
+      out.push({ date, version });
+    }
+    return out.sort((a, b) => cmpStr(b.date, a.date));
+  }
+
+  const dayOf = ts => {
+    const d = new Date(ts * 1000);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+
+  // スレッドの版が DLsite で出た日（推定）。更新情報がなければ null。
+  //   日付版 → その日付
+  //   バージョン番号 → 更新情報に同じ番号があればその日。なければ、投稿日までに出た一番新しい更新の日。
+  //                    最初の更新より前に投稿されたものは発売時の版なので、どの更新よりも古い扱い（'0000-00-00'）
+  function revDateOf(t, revs) {
+    if (!revs || !revs.length) return null;
+    if (t.dateVer) return t.dateVer;
+    if (!t.version) return null;
+    const hit = revs.find(r => r.version && cmpVersion(r.version, t.version) === 0);
+    if (hit) return hit.date;
+    if (!t.posted) return null;
+    const p = dayOf(t.posted);
+    return revs.find(r => r.date <= p)?.date || '0000-00-00';
+  }
+
+  // バージョン番号のものと日付版のものが混ざっていて、そのままでは比べられないか
+  const isMixed = list => list.some(r => tier(r) === 2) && list.some(r => tier(r) === 1);
+
+  // バージョン番号と日付版を、DLsite の更新情報から推定した日で比べられるとき
+  const byRevDate = (a, b) => tier(a) && tier(b) && tier(a) !== tier(b) && a.revDate && b.revDate && a.revDate !== b.revDate;
+
   // 新しさの比較。どの組み合わせでも同じ基準で比べるので、並び順で結果が変わらない。
+  //   0. バージョン番号と日付版は、DLsite の更新情報から推定した日があればそれで比べる
   //   1. 版の情報の強さ（バージョン番号あり ＞ 日付版 ＞ なし）
   //   2. 同じ強さの中で：バージョン番号 または 日付版
   //   3. タイトル内の一番新しい日付（ないものは古い扱い）
   //   4. 投稿日
   function newer(a, b) {
+    if (byRevDate(a, b)) return cmpStr(a.revDate, b.revDate);
     const t = tier(a) - tier(b);
     if (t) return t;
     if (a.version) {
@@ -198,6 +248,7 @@
   // 1位と2位を分けた基準（バッジに出す）
   function decidedBy(a, b) {
     if (!b) return '';
+    if (byRevDate(a, b)) return 'DLsite更新情報';
     if (tier(a) !== tier(b)) return tier(b) === 0 ? '版の表記の有無' : '版の表記の種類';
     if (a.version && cmpVersion(a.version, b.version)) return 'バージョン';
     if (a.dateVer && a.dateVer !== b.dateVer) return '日付版';
@@ -206,22 +257,25 @@
   }
 
   // 保存済みのスレッドに、タイトルから版の情報を付け直す（古いバージョンで保存した結果にも効くよう、表示のたびに計算する）
-  function threadInfo(t) {
+  function threadInfo(t, revs) {
     const pv = parseVersion(t.title);
     const dates = parseDates(t.title);
     if (pv.dateVer && !dates.includes(pv.dateVer)) dates.push(pv.dateVer), dates.sort();
-    return Object.assign({}, t, {
+    const info = Object.assign({}, t, {
       version: pv.version, dateVer: pv.dateVer, lastDate: dates[dates.length - 1] || null,
       isPatch: PATCH_RE.test(t.title), isRequest: isRequest(t.title, t.forum), isLatest: false,
     });
+    info.revDate = revDateOf(info, revs);
+    return info;
   }
 
   // 1作品分のスレッドを並べ、最新を決める。
   //   最新の候補はタイトルにコードがあるもの（1件もなければ、作品名で見つかったもの）。リクエストスレッドは候補にしない。
   //   その中にパッチ/翻訳があれば、パッチ/翻訳だけで比べる。
   //   並び：最新 → コードあり → 作品名で見つかった → そのほか（それぞれ新しい順）
-  function rankThreads(threads) {
-    const list = threads.map(threadInfo);
+  //   revs（DLsite の更新情報）があれば、バージョン番号と日付版をそれで比べる。mixed は「比べるのに更新情報がほしい」印
+  function rankThreads(threads, revs = null) {
+    const list = threads.map(t => threadInfo(t, revs));
     const withCode = list.filter(t => t.hasCode && !t.isRequest);
     const byTitle = withCode.length ? [] : list.filter(t => t.byTitle && !t.isRequest);
     const pool = withCode.length ? withCode : byTitle;
@@ -229,7 +283,7 @@
     const cands = patches.length ? patches : pool;
     const sorted = [...cands].sort((a, b) => newer(b, a));
     const latest = sorted[0] || null;
-    const info = { latest, basis: '', patchOnly: patches.length > 0, byTitle: byTitle.length > 0, count: cands.length };
+    const info = { latest, basis: '', patchOnly: patches.length > 0, byTitle: byTitle.length > 0, count: cands.length, mixed: isMixed(cands) };
     if (latest) latest.isLatest = true;
     if (latest && cands.length > 1) info.basis = decidedBy(latest, sorted[1]);
     list.sort((a, b) => (b.isLatest - a.isLatest) || (b.hasCode - a.hasCode) || (!!b.byTitle - !!a.byTitle) || newer(b, a));
@@ -240,11 +294,11 @@
   //   newCount: 前回なかったスレッドの数（URLで比べる）
   //   latestChanged: 最新のスレッドか、そのバージョンが変わったか
   const verLabel = t => (t ? (t.version ? 'v' + t.version : t.dateVer || '版不明') : '');
-  function diffResults(prev, next) {
+  function diffResults(prev, next, revs = null) {
     if (!prev || prev.error) return null;
     const old = new Set(prev.threads.map(t => t.url));
     const newCount = next.filter(t => !old.has(t.url)).length;
-    const a = rankThreads(prev.threads).latest, b = rankThreads(next).latest;
+    const a = rankThreads(prev.threads, revs).latest, b = rankThreads(next, revs).latest;
     const latestChanged = !!b && (!a || a.url !== b.url || verLabel(a) !== verLabel(b));
     if (!newCount && !latestChanged) return null;
     return { newCount, latestChanged, from: a ? verLabel(a) : '', to: verLabel(b) };
@@ -341,11 +395,7 @@
     return span;
   }
 
-  function fmtDate(ts) {
-    if (!ts) return '';
-    const d = new Date(ts * 1000);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
+  const fmtDate = ts => (ts ? dayOf(ts) : '');
 
   function renderBadges(info, groupSize, isLatest, basis, latest) {
     info.li.querySelector('.apf-badges')?.remove();
@@ -367,6 +417,58 @@
     if (info.isPatch) box.appendChild(badge('パッチ/翻訳'));
     info.li.classList.toggle('apf-row-latest', groupSize > 1 && isLatest);
     info.li.querySelector('.contentRow-title').after(box);
+  }
+
+  // ---------- DLsite の更新情報（取得と保存） ----------
+  // バージョン番号と日付版が混ざっていて比べられない作品だけ取りに行く（1件500バイトほど）。結果は7日間使い回す
+  const REV_KEY = 'apf-rev';
+  const REV_DAYS = 7;
+  const canFetchRev = typeof GM_xmlhttpRequest === 'function';
+  let revStore;
+  try { revStore = JSON.parse(localStorage.getItem(REV_KEY)) || {}; } catch { revStore = {}; }
+  const saveRev = () => { try { localStorage.setItem(REV_KEY, JSON.stringify(revStore)); } catch {} };
+  // 保存済みの更新情報（古くても使う。なければ null）
+  const cachedRevs = code => revStore[code]?.revs || null;
+  const revFresh = code => !!revStore[code] && Date.now() - revStore[code].at < REV_DAYS * 86400000;
+  const isCode = s => /^(?:RJ|VJ|BJ|RE)\d{6,8}$/.test(s);
+
+  function gmGetJson(url) {
+    return new Promise((res, rej) => GM_xmlhttpRequest({
+      method: 'GET', url, timeout: 15000,
+      onload: r => {
+        if (r.status !== 200) return rej(new Error('HTTP ' + r.status));
+        try { res(JSON.parse(r.responseText)); } catch (e) { rej(e); }
+      },
+      onerror: () => rej(new Error('network')),
+      ontimeout: () => rej(new Error('timeout')),
+    }));
+  }
+
+  // 作品コードの更新情報を取る（保存済みで新しければそれを使う）。
+  // 何件頼まれても1件ずつ、DLsite への問い合わせは1秒以上あけて行う
+  let revQueue = Promise.resolve(), revLast = 0;
+  const pause = ms => new Promise(r => setTimeout(r, ms));
+  function getRevisions(code) {
+    if (revFresh(code) || !canFetchRev) return Promise.resolve(cachedRevs(code));
+    const job = revQueue.then(async () => {
+      if (revFresh(code)) return cachedRevs(code);
+      const list = [];
+      for (let page = 1; page <= 5; page++) {
+        const gap = 1000 - (Date.now() - revLast);
+        if (gap > 0) await pause(gap);
+        revLast = Date.now();
+        const j = await gmGetJson(`https://www.dlsite.com/api/product/maniax/fetchRevision?product_id=${encodeURIComponent(code)}&page=${page}&locale=ja_JP`);
+        if (!j || !j.success) throw new Error('DLsite の更新情報を読めませんでした');
+        list.push(...(j.list || []));
+        if (!j.more) break;
+      }
+      const revs = parseRevisions(list);
+      revStore[code] = { at: Date.now(), revs };
+      saveRev();
+      return revs;
+    });
+    revQueue = job.catch(() => {});
+    return job;
   }
 
   // ---------- メイン ----------
@@ -400,6 +502,19 @@
     }
   }
 
+  // 比べるのに更新情報がほしい作品の分を DLsite から取り、取れたら判定し直す（1ページで1作品1回まで）
+  const revTried = new Set();
+  async function loadRevisions(codes) {
+    let got = false, failed = 0;
+    for (const c of codes) {
+      revTried.add(c);
+      status(`DLsite の更新情報を取得中…（${c}）`);
+      try { if ((await getRevisions(c))?.length) got = true; } catch { failed++; }
+    }
+    if (got) refresh();
+    else status(failed ? `DLsite の更新情報を取得できませんでした（${failed}件）` : 'DLsite に更新情報がありませんでした');
+  }
+
   function refresh() {
     // グループごとに最新を判定
     // 「リクエストを隠す」ときは、リクエストスレッドを作品グループに数えない
@@ -412,11 +527,17 @@
       if (!groups.has(r.group)) groups.set(r.group, []);
       groups.get(r.group).push(r);
     }
+    const wantRevs = [];
     for (const [k, g] of groups) {
+      // バージョン番号と日付版は、DLsite の更新情報があればそれで比べる
+      const revs = isCode(k) ? cachedRevs(k) : null;
+      for (const r of g) r.revDate = revDateOf(r, revs);
       const o = orderGroup(g);
+      if (o.mixed && isCode(k) && !revFresh(k) && canFetchRev && !revTried.has(k)) wantRevs.push(k);
       groups.set(k, o.list);
       o.list.forEach(r => { r.isLatest = r === o.latest; r.groupSize = g.length; renderBadges(r, g.length, r.isLatest, o.basis, o.latest); });
     }
+    if (wantRevs.length) Promise.resolve().then(() => loadRevisions(wantRevs));   // 下の状態表示のあとに「取得中」を出す
 
     // 並べ替え
     list.querySelectorAll('.apf-group-head').forEach(e => e.remove());
@@ -734,7 +855,13 @@
             autoMsg(`${code} を作品名でも検索中…`);
             threads.push(...await searchTitle(kw, code, threads));
           }
-          const changes = mergeChanges(prev?.changes, diffResults(prev, threads));
+          // バージョン番号と日付版が混ざっていたら、比べるために DLsite の更新情報を取る（取れなくても検索結果は残す）
+          let revs = cachedRevs(code);
+          if (canFetchRev && !revFresh(code) && rankThreads(threads, revs).mixed) {
+            autoMsg(`${code} の DLsite 更新情報を取得中…`);
+            try { revs = await getRevisions(code); } catch {}
+          }
+          const changes = mergeChanges(prev?.changes, diffResults(prev, threads, revs));
           auto.results[code] = Object.assign({ at: Date.now(), threads }, kw ? { keyword: kw } : {}, changes ? { changes } : {});
           floods = 0;
         } catch (e) {
@@ -782,7 +909,7 @@
       if (!r) { if (!onlyFound) lines.push(blank(c, '未検索')); continue; }
       if (!r.threads.length) { if (!onlyFound) lines.push(blank(c, r.error ? 'エラー' : 'なし')); continue; }
       const ch = r.changes ? changeText(r.changes) : '';
-      for (const t of rankThreads(r.threads).list) {
+      for (const t of rankThreads(r.threads, cachedRevs(c)).list) {
         if (onlyLatest && !t.isLatest) continue;
         lines.push([c, t.kind === 'thread' ? 'スレッド' : '投稿内',
           t.hasCode ? 'コード' : t.byTitle ? '作品名' : 'そのほか', t.isLatest ? '★' : '',
@@ -979,7 +1106,7 @@
       if (panelView === 'changed' && !r?.changes) continue;
       if (panelView === 'none' && (!r || has)) continue;
       if (panelView === 'todo' && r && !r.error) continue;
-      const rk = has ? rankThreads(r.threads) : null;
+      const rk = has ? rankThreads(r.threads, cachedRevs(c)) : null;
       const cell = !r ? el('span', { class: 'apf-weak' }, 'まだ')
         : r.error ? el('span', {}, 'エラー: ' + r.error)
         : !has ? el('span', { class: 'apf-weak' }, 'なし')

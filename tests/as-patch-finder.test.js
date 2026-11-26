@@ -13,7 +13,7 @@ const start = src.indexOf('// ---------- 解析 ----------');
 const end = src.indexOf('// ---------- 表示 ----------');
 assert.ok(start >= 0 && end > start, '解析／表示の印が見つかりません');
 const apf = new Function(src.slice(start, end) +
-  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, orphanCodes, titleKeyword, titleMatches, codeOf, isRequest, orderGroup };')();
+  '\nreturn { parseVersion, parseDates, cmpVersion, newer, decidedBy, rankThreads, diffResults, mergeChanges, cutCode, orphanCodes, titleKeyword, titleMatches, codeOf, isRequest, orderGroup, parseRevisions, revDateOf };')();
 
 const T = (title, extra = {}) => Object.assign({ title, url: 'https://example.invalid/' + encodeURIComponent(title), hasCode: true, posted: 0, kind: 'thread' }, extra);
 const info = (title, posted = 0) => {
@@ -189,4 +189,47 @@ test('作品グループの最新は、リクエストと本文だけで当た�
   assert.equal(apf.orderGroup([weak, req]).latest, weak);
   // リクエストしかなければ最新なし
   assert.equal(apf.orderGroup([req]).latest, null);
+});
+
+test('DLsite の更新情報の読み取り', () => {
+  const revs = apf.parseRevisions([
+    { release_date: '2026年09月23日', info: '・バージョンを1.0.0から1.0.1へ更新' },
+    { release_date: '2026年10月03日', info: '・Ver1.0.3に更新\r\n・不具合修正' },
+    { release_date: '2026年09月26日', info: '・Ｖｅｒ 1.0.2に更新' },   // 全角でも読む
+    { release_date: '2026年08月01日', info: '・誤字修正' },
+  ]);
+  assert.deepEqual(revs, [
+    { date: '2026-10-03', version: '1.0.3' },
+    { date: '2026-09-26', version: '1.0.2' },
+    { date: '2026-09-23', version: '1.0.1' },
+    { date: '2026-08-01', version: null },
+  ]);
+});
+
+test('バージョン番号と日付版を DLsite の更新情報で比べる', () => {
+  const ts = s => Date.parse(s + 'T12:00:00') / 1000;
+  const revs = [
+    { date: '2026-10-03', version: '1.0.3' },
+    { date: '2026-09-26', version: null },
+    { date: '2026-09-01', version: null },
+  ];
+  // 番号が更新情報にあればその日、なければ投稿日までに出た一番新しい更新の日
+  assert.equal(apf.revDateOf(info('Game v1.0.3'), revs), '2026-10-03');
+  assert.equal(apf.revDateOf(info('Game v1.0.2', ts('2026-09-28')), revs), '2026-09-26');
+  assert.equal(apf.revDateOf(info('Game Ver26.09.26'), revs), '2026-09-26');
+  assert.equal(apf.revDateOf(info('Game v1.0.2', ts('2026-09-28')), []), null);
+  assert.equal(apf.revDateOf(info('Game v1.0.0', ts('2026-08-20')), revs), '0000-00-00');   // 最初の更新より前は発売時の版   // 更新情報がなければ使わない
+
+  const T2 = (title, posted) => T(title, { posted: ts(posted) });
+  const threads = [T2('RJ01 Game v1.0.2', '2026-09-28'), T2('RJ01 Game Ver26.10.03', '2026-10-04')];
+  // 更新情報がなければ今までどおりバージョン番号が勝つ
+  assert.equal(apf.rankThreads(threads).latest.title, 'RJ01 Game v1.0.2');
+  assert.ok(apf.rankThreads(threads).mixed);
+  // 更新情報があれば、新しい日付版が勝つ
+  const rk = apf.rankThreads(threads, revs);
+  assert.equal(rk.latest.title, 'RJ01 Game Ver26.10.03');
+  assert.equal(rk.basis, 'DLsite更新情報');
+  // 番号が更新情報と一致する新しい版なら、古い日付版に勝つ
+  const rk2 = apf.rankThreads([T2('RJ01 Game v1.0.3', '2026-10-05'), T2('RJ01 Game Ver26.09.26', '2026-09-27')], revs);
+  assert.equal(rk2.latest.title, 'RJ01 Game v1.0.3');
 });
