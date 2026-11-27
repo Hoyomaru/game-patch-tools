@@ -594,8 +594,8 @@ function Invoke-RenameSearch([string[]]$Terms, [hashtable]$Cache) {
       if ($script:RenameStop) { break }
       $plbl.Text = "$n / $($Terms.Count) 件（止めても、そこまでの結果は使えます）"
       [System.Windows.Forms.Application]::DoEvents()
-      $r = Search-DLsite $term -Pump { [System.Windows.Forms.Application]::DoEvents() }
-      $Cache[$term] = [pscustomobject]@{ Ok = $r.Ok; At = (Get-Date -Format 'yyyy-MM-dd'); Hits = @($r.Hits) }
+      $r = Search-DLsiteWithFallback $term -Pump { [System.Windows.Forms.Application]::DoEvents() }
+      $Cache[$term] = [pscustomobject]@{ Ok = $r.Ok; At = (Get-Date -Format 'yyyy-MM-dd'); Hits = @($r.Hits); V = 2 }
       $n++
       # つながらないことが3回続いたら止める（1件で最大 10 秒待つため）
       if ($r.Ok) { $failRun = 0 } else { $failRun++; if ($failRun -ge 3) { $gaveUp = $true; break } }
@@ -644,7 +644,7 @@ function Show-RenameDialog {
   # ブックマークにない作品で番号がわからないものを DLsite で検索する（保存した結果があるものは検索しない）
   $cache = Read-SearchCache $SearchCachePath
   $terms = @($unknown | Where-Object { $_.State -eq 'nocode' -and $_.Term } | ForEach-Object Term | Select-Object -Unique |
-             Where-Object { -not $cache.ContainsKey($_) -or -not $cache[$_].Ok })
+             Where-Object { Test-SearchNeeded $cache $_ })
   if ($terms.Count) {
     $q = "ブックマークにない作品のうち、RJ番号がわからないもの $($terms.Count) 件を DLsite で検索します。`n" +
          "送るのは検索する言葉（ゲームの中の作品名か、フォルダ名を整えたもの）だけです。1件に1秒ほどかかり、途中で止められます。`n`n" +

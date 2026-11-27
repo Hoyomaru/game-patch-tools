@@ -191,3 +191,55 @@ Describe 'Search-DLsite（問い合わせを差し替えて）' {
     $r.Hits[0].Floor | Should Be 'home'
   }
 }
+
+Describe '検索の言葉のゴミ取り（版の数字・win など）' {
+  It '点で区切った版の数字と EA を除く' { New-SearchTerm 'かくうの全国大会_0.7.1EA' $false | Should Be 'かくうの全国大会' }
+  It 'win と Fixed を除く' { New-SearchTerm 'Echoes of the kakuu 3.7.3 win Fixed' $false | Should Be 'Echoes of the kakuu' }
+  It 'ただの数字1つは残す' { New-SearchTerm 'かくう2' $false | Should Be 'かくう2' }
+  It 'ゲームの中の作品名の版も除く' { New-SearchTerm '反抗的なかくうが堕ちるまで v1.1.0' $false | Should Be '反抗的なかくうが堕ちるまで' }
+}
+
+Describe 'Get-SearchFallbacks' {
+  It '記号で区切れていれば一番長い部分、その前半の順' { (Get-SearchFallbacks 'かくう 負け負け誘惑かくう') -join '|' | Should Be '負け負け誘惑かくう|負け負け誘' }
+  It '1つだけなら前半だけ' { (Get-SearchFallbacks '反抗的なかくうが堕ちるまで') -join '|' | Should Be '反抗的なかくう' }
+  It '短すぎるものは作らない' { @(Get-SearchFallbacks 'かくう').Count | Should Be 0 }
+  It '英数字だけの言葉は短くしない（関係ない作品ばかり出るため）' { @(Get-SearchFallbacks 'TriplePairing').Count | Should Be 0; @(Get-SearchFallbacks 'Slave Princess Kakuu').Count | Should Be 0 }
+}
+
+Describe 'Search-DLsiteWithFallback（問い合わせを差し替えて）' {
+  $json = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\dlsite-search-sample.json'))
+  $empty = '{"search_result":"","page_info":{"count":0}}'
+  It '見つかれば短くしない' {
+    $script:calls = 0
+    $r = Search-DLsiteWithFallback '反抗的なかくうが堕ちるまで' -GapMs 0 -Fetch { param([string[]]$Urls) $script:calls++; @($json, $json) }
+    $script:calls | Should Be 1
+    $r.UsedTerm | Should Be '反抗的なかくうが堕ちるまで'
+  }
+  It '0 件なら短くして検索し直し、使った言葉を返す' {
+    $script:calls = 0
+    $r = Search-DLsiteWithFallback '反抗的なかくうが堕ちるまで' -GapMs 0 -Fetch { param([string[]]$Urls) $script:calls++; if ($script:calls -eq 1) { @($empty, $empty) } else { @($json, $empty) } }
+    $script:calls | Should Be 2
+    $r.Ok | Should Be $true
+    @($r.Hits).Count | Should BeGreaterThan 0
+    $r.UsedTerm | Should Be '反抗的なかくう'
+  }
+  It '返事が取れなければ短くしない（Ok は偽）' {
+    $script:calls = 0
+    $r = Search-DLsiteWithFallback '反抗的なかくうが堕ちるまで' -GapMs 0 -Fetch { param([string[]]$Urls) $script:calls++; @($null, $null) }
+    $script:calls | Should Be 1
+    $r.Ok | Should Be $false
+  }
+}
+
+Describe 'Test-SearchNeeded（保存した検索結果を使うか）' {
+  It '保存がなければ検索する' { Test-SearchNeeded @{} 'かくう' | Should Be $true }
+  It '失敗していれば検索する' { Test-SearchNeeded @{ 'かくう' = [pscustomobject]@{ Ok = $false; Hits = @(); V = 2 } } 'かくう' | Should Be $true }
+  It '前のやり方で 0 件なら、短くして検索し直すために検索する' { Test-SearchNeeded @{ 'かくう' = [pscustomobject]@{ Ok = $true; Hits = @(); V = 0 } } 'かくう' | Should Be $true }
+  It '今のやり方で 0 件なら検索しない' { Test-SearchNeeded @{ 'かくう' = [pscustomobject]@{ Ok = $true; Hits = @(); V = 2 } } 'かくう' | Should Be $false }
+  It '見つかっていれば検索しない' { Test-SearchNeeded @{ 'かくう' = [pscustomobject]@{ Ok = $true; Hits = @([pscustomobject]@{ Code = 'RJ00000001'; Title = 'x' }); V = 0 } } 'かくう' | Should Be $false }
+  It '保存して読み直しても V が残る' {
+    $p = Join-Path $TestDrive 'cache.json'
+    Save-SearchCache $p @{ 'かくう' = [pscustomobject]@{ Ok = $true; At = '2026-11-27'; Hits = @(); V = 2 } }
+    (Read-SearchCache $p)['かくう'].V | Should Be 2
+  }
+}

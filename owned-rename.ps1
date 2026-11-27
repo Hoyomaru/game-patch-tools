@@ -126,7 +126,9 @@ function Get-UnknownTargets($Candidates, [string[]]$ExcludePaths, [string[]]$Gam
     $t = New-RenameTarget '' $w.Path $w.OldName $w.IsArchive '' 'nocode' '' $false
     $t.Choices = @($codes | ForEach-Object { [pscustomobject]@{ Code = $_; Title = '' } })
     $inner = Get-InnerGameTitle $w.Path
-    if ($inner) { $t.Term = $inner; $t.FromInnerTitle = $true } else { $t.Term = New-SearchTerm $w.OldName $w.IsArchive }
+    # ゲームの中の作品名にも版（v1.1.0 など）が付いていることがあるので、フォルダ名と同じくゴミを取る
+    $innerTerm = if ($inner) { New-SearchTerm $inner $false } else { '' }
+    if ($innerTerm) { $t.Term = $innerTerm; $t.FromInnerTitle = $true } else { $t.Term = New-SearchTerm $w.OldName $w.IsArchive }
     $t
   }
 }

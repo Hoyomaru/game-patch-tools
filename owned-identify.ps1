@@ -205,8 +205,27 @@ function New-SearchTerm([string]$Name, [bool]$IsArchive) {
   $s = $s -replace '\[[^\]]*\]|【[^】]*】|\([^)]*\)|〔[^〕]*〕', ' '
   $s = $s -replace '(?i)(?:(?<![a-z0-9])ver(?:sion)?\.?\s*|(?<![a-z0-9])v)\d+(?:[._\-]\d+)*[a-z]?(?![\w.])', ' '
   $s = $s -replace '(?i)(体験版|trial|demo|完全版|製品版|dl版|パッケージ版|日本語版|english|translation|patch)', ' '
+  # v の付かない版（0.7.1EA・3.7.3 など、点で区切った数字）と、配布の印（win・Fixed など）
+  $s = $s -replace '(?i)(?<![\p{L}\p{N}.])\d+(?:\.\d+)+[a-z]{0,3}(?![\p{L}\p{N}])', ' '
+  $s = $s -replace '(?i)(?<![a-z])(win(?:dows)?(?:32|64)?|mac|linux|android|x64|x86|64bit|32bit|fixed|fix|ea|early access)(?![a-z])', ' '
   $s = $s -replace '[^\p{L}\p{N}]+', ' '
   return $s.Trim()
+}
+
+# 検索して 0 件だったときに使う、短くした言葉（最大2つ）。
+# DLsite の検索は言葉をそのまま探すので、作品名が少し違う（ふりがな入りなど）・検索できない言葉が混ざると 0 件になるため
+#   1. 空白で区切れていれば、一番長い部分  2. その前半（3文字以上のときだけ）。日本語などを含む言葉だけ
+function Get-SearchFallbacks([string]$Term) {
+  $out = New-Object System.Collections.Generic.List[string]
+  # 英数字だけの言葉（英語版や DLsite 以外のお店の作品に多い）は、短くすると関係ない作品ばかり出るので短くしない
+  if ($Term -notmatch '[^\x00-\x7F]') { return $out.ToArray() }
+  $parts = @($Term -split '\s+' | Where-Object { $_ })
+  if ($parts.Count -eq 0) { return $out.ToArray() }
+  $longest = @($parts | Sort-Object Length -Descending)[0]
+  if ($parts.Count -gt 1) { $out.Add($longest) }
+  $half = $longest.Substring(0, [int][Math]::Ceiling($longest.Length / 2))
+  if ($half.Length -ge 3 -and $half -ne $longest -and -not $out.Contains($half)) { $out.Add($half) }
+  return $out.ToArray()
 }
 
 # ---------- 3. DLsite の検索と保存 ----------
@@ -277,6 +296,22 @@ function Search-DLsite([string]$Term, [int]$TimeoutSec = 10, [scriptblock]$Pump 
   return [pscustomobject]@{ Ok = $ok; Hits = $hits.ToArray() }
 }
 
+# Search-DLsite して、返事は取れたのに 0 件なら、短くした言葉（Get-SearchFallbacks）で検索し直す。
+# 問い合わせの間は $GapMs あける（その間も $Pump を呼ぶ）。戻り値: Search-DLsite の結果に UsedTerm（最後に検索した言葉）を足したもの
+function Search-DLsiteWithFallback([string]$Term, [int]$TimeoutSec = 10, [scriptblock]$Pump = $null, [scriptblock]$Fetch = $null, [int]$GapMs = 800) {
+  $r = Search-DLsite $Term $TimeoutSec $Pump $Fetch
+  $used = $Term
+  if ($r.Ok -and @($r.Hits).Count -eq 0) {
+    foreach ($f in @(Get-SearchFallbacks $Term)) {
+      for ($w = 0; $w -lt $GapMs; $w += 50) { if ($Pump) { & $Pump }; Start-Sleep -Milliseconds 50 }
+      $r = Search-DLsite $f $TimeoutSec $Pump $Fetch
+      $used = $f
+      if (-not $r.Ok -or @($r.Hits).Count -gt 0) { break }
+    }
+  }
+  return [pscustomobject]@{ Ok = $r.Ok; Hits = $r.Hits; UsedTerm = $used }
+}
+
 # 自動でチェックを付けてよい番号：ゲームの中の作品名で検索したときだけ、正規化した作品名が検索した言葉と同じものが全体で1つならその番号。ほかは ''
 function Select-AutoCode($Hits, [string]$Term, [bool]$FromInnerTitle) {
   if (-not $FromInnerTitle) { return '' }
@@ -293,13 +328,21 @@ function Read-SearchCache([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path)) { return $c }
   try {
     $o = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
-    foreach ($p in $o.PSObject.Properties) { $c[$p.Name] = [pscustomobject]@{ Ok = [bool]$p.Value.Ok; At = [string]$p.Value.At; Hits = @($p.Value.Hits | Where-Object { $_ }) } }
+    foreach ($p in $o.PSObject.Properties) { $c[$p.Name] = [pscustomobject]@{ Ok = [bool]$p.Value.Ok; At = [string]$p.Value.At; Hits = @($p.Value.Hits | Where-Object { $_ }); V = [int]$p.Value.V } }
   } catch { }
   return $c
 }
 
+# 保存した検索結果では足りず、検索が要るか。失敗したもの・前のやり方（V が 2 未満。0 件でも短くして検索し直さなかった）で 0 件だったものは検索する
+function Test-SearchNeeded([hashtable]$Cache, [string]$Term) {
+  if (-not $Cache.ContainsKey($Term)) { return $true }
+  $e = $Cache[$Term]
+  if (-not $e.Ok) { return $true }
+  return (@($e.Hits | Where-Object { $_ }).Count -eq 0 -and [int]$e.V -lt 2)
+}
+
 function Save-SearchCache([string]$Path, [hashtable]$Cache) {
   $o = [ordered]@{}
-  foreach ($k in @($Cache.Keys | Sort-Object)) { $v = $Cache[$k]; $o[$k] = [ordered]@{ Ok = [bool]$v.Ok; At = [string]$v.At; Hits = @($v.Hits) } }
+  foreach ($k in @($Cache.Keys | Sort-Object)) { $v = $Cache[$k]; $o[$k] = [ordered]@{ Ok = [bool]$v.Ok; At = [string]$v.At; Hits = @($v.Hits); V = [int]$v.V } }
   [IO.File]::WriteAllText($Path, ($o | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding $false))
 }
