@@ -41,3 +41,24 @@ Describe 'Get-StorePageUrl' {
   It 'FANZA GAMES' { Get-StorePageUrl 'FANZA kakuu_0001' | Should Be 'https://dlsoft.dmm.co.jp/detail/kakuu_0001/' }
   It '自分で入れたものは空' { Get-StorePageUrl (New-ManualCode 'BOOTH' 'かくう') | Should Be '' }
 }
+
+Describe '作品名の読み取り（保存した見本で）' {
+  $steam = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\steam-appdetails-sample.json'), [Text.Encoding]::UTF8)
+  $fanza = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\fanza-page-sample.html'), [Text.Encoding]::UTF8)
+  It 'Steam の name' { ConvertFrom-SteamAppDetails $steam '1234560' | Should Be '架空のゲーム' }
+  It 'Steam の appid が違えば空' { ConvertFrom-SteamAppDetails $steam '7654321' | Should Be '' }
+  It 'Steam の success が偽なら空' { ConvertFrom-SteamAppDetails '{"1234560":{"success":false}}' '1234560' | Should Be '' }
+  It 'Steam の返事が壊れていれば空' { ConvertFrom-SteamAppDetails 'not json' '1234560' | Should Be '' }
+  It 'FANZA は見出し（h1）を使う（og:title は長いと途中で切れるため。中のタグと &amp; を戻す）' { ConvertFrom-FanzaPage $fanza | Should Be '架空の同人ゲーム & 体験 〜長い副題の続き〜' }
+  It 'FANZA の見出しがなければ og:title' { ConvertFrom-FanzaPage '<meta property="og:title" content="架空 &amp; 作品">' | Should Be '架空 & 作品' }
+  It 'FANZA の og:title がなければ空（年齢確認のページなど）' { ConvertFrom-FanzaPage '<html><head><title>年齢認証</title></head></html>' | Should Be '' }
+}
+
+Describe 'Get-StoreTitles' {
+  It '自分で入れた作品名はネットに出ずに返す' {
+    $c = New-ManualCode 'BOOTH' 'かくう'
+    $r = Get-StoreTitles @($c)
+    $r[$c] | Should Be 'かくう'
+    $script:StoreFailedCount | Should Be 0
+  }
+}
