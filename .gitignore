@@ -3,5 +3,6 @@ owned-gui-settings.json
 owned-links.json
 owned-report.html
 bookmark-backups/
+rename-logs/
 Bookmarks*
 *.log

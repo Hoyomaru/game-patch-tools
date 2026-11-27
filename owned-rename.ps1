@@ -82,3 +82,78 @@ function Set-RenameNames($Targets, [hashtable]$Titles) {
     $t.State = if (Test-Path -LiteralPath $t.NewPath) { 'exists' } else { 'ok' }
   }
 }
+
+# ---------- 3. 名前を変える・戻す ----------
+
+# owned-links.json に覚えているパスのうち、$OldPath そのものと、その下にあるパスを $NewPath に書き換える（大文字小文字は区別しない）
+function Update-LinkPaths($Links, [string]$OldPath, [string]$NewPath) {
+  $old = $OldPath.TrimEnd('\')
+  $fix = {
+    param([string]$p)
+    if ($p -ieq $old) { return $NewPath }
+    if ($p.StartsWith($old + '\', [StringComparison]::OrdinalIgnoreCase)) { return $NewPath + $p.Substring($old.Length) }
+    return $p
+  }
+  foreach ($k in @($Links.Same.Keys)) { $Links.Same[$k] = & $fix ([string]$Links.Same[$k]) }
+  foreach ($k in @($Links.Diff.Keys)) { $Links.Diff[$k] = @(@($Links.Diff[$k]) | ForEach-Object { & $fix ([string]$_) }) }
+}
+
+function Write-RenameLog([string]$Path, $Entries) {
+  $json = [ordered]@{ entries = @($Entries) } | ConvertTo-Json -Depth 4
+  [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding $false))
+}
+
+# State = 'ok' の対象の名前を変える。変える前に記録ファイル（$LogDir\rename-日時.json）に全件を書き、1件ごとに done を書き足す。
+# owned-links.json があれば、先に同じ名前の .links.json にコピーしてから書き換える。
+# 使用中などで変えられなかったものは飛ばして続ける。
+# 戻り値: Log（記録ファイル）/ Done（変えた数）/ Failed（@{ OldName; Reason } の一覧）
+function Invoke-FolderRename($Targets, [string]$LogDir, $Links, [string]$LinksPath) {
+  # 入れ子になった別の作品があっても困らないよう、深い方から変える
+  $todo = @(@($Targets) | Where-Object { $_.State -eq 'ok' } | Sort-Object { ([string]$_.Path).Split('\').Count } -Descending)
+  $failed = New-Object System.Collections.Generic.List[object]
+  if ($todo.Count -eq 0) { return [pscustomobject]@{ Log = ''; Done = 0; Failed = @() } }
+  New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+  $log = Join-Path $LogDir ('rename-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.json')
+  if ($LinksPath -and (Test-Path -LiteralPath $LinksPath)) { Copy-Item -LiteralPath $LinksPath -Destination ($log -replace '\.json$', '.links.json') }
+  $entries = @($todo | ForEach-Object { [pscustomobject]@{ old = $_.Path; new = $_.NewPath; done = $false } })
+  Write-RenameLog $log $entries
+  $done = 0
+  for ($i = 0; $i -lt $todo.Count; $i++) {
+    try {
+      Rename-Item -LiteralPath $todo[$i].Path -NewName $todo[$i].NewName -ErrorAction Stop
+      $entries[$i].done = $true; $done++
+      Update-LinkPaths $Links $todo[$i].Path $todo[$i].NewPath
+      Write-RenameLog $log $entries
+    } catch {
+      $failed.Add([pscustomobject]@{ OldName = $todo[$i].OldName; Reason = $_.Exception.Message })
+    }
+  }
+  if ($done -and $LinksPath) { Save-OwnedLinks $LinksPath $Links }
+  return [pscustomobject]@{ Log = $log; Done = $done; Failed = $failed.ToArray() }
+}
+
+# 記録ファイルの done のものを逆の順に元の名前へ戻し、owned-links.json のパスも戻す。戻したものは done を外す（2回戻しても困らない）。
+# 元の名前のものがもうある・新しい名前のものが見つからない（手で動かした）ものは飛ばす。
+# 戻り値: Done（戻した数）/ Skipped（@{ Name; Reason } の一覧）
+function Undo-FolderRename([string]$LogPath, $Links, [string]$LinksPath) {
+  $entries = @((Get-Content -LiteralPath $LogPath -Raw -Encoding UTF8 | ConvertFrom-Json).entries)
+  $skipped = New-Object System.Collections.Generic.List[object]
+  $done = 0
+  for ($i = $entries.Count - 1; $i -ge 0; $i--) {
+    $e = $entries[$i]
+    if (-not $e.done) { continue }
+    $name = Split-Path -Leaf $e.new
+    if (-not (Test-Path -LiteralPath $e.new)) { $skipped.Add([pscustomobject]@{ Name = $name; Reason = '見つかりません（名前を変えたか、動かした）' }); continue }
+    if (Test-Path -LiteralPath $e.old) { $skipped.Add([pscustomobject]@{ Name = $name; Reason = "元の名前「$(Split-Path -Leaf $e.old)」のものがもうあります" }); continue }
+    try {
+      Rename-Item -LiteralPath $e.new -NewName (Split-Path -Leaf $e.old) -ErrorAction Stop
+      $e.done = $false; $done++
+      Update-LinkPaths $Links $e.new $e.old
+      Write-RenameLog $LogPath $entries
+    } catch {
+      $skipped.Add([pscustomobject]@{ Name = $name; Reason = $_.Exception.Message })
+    }
+  }
+  if ($done -and $LinksPath) { Save-OwnedLinks $LinksPath $Links }
+  return [pscustomobject]@{ Done = $done; Skipped = $skipped.ToArray() }
+}

@@ -97,3 +97,76 @@ Describe 'New-RenameName' {
     $n | Should Match '^RJ01234567 あ+ v1\.0$'
   }
 }
+
+Describe 'Update-LinkPaths' {
+  $links = New-TestLinks
+  $links.Same['RJ00000001'] = 'E:\G\架空'
+  $links.Same['RJ00000002'] = 'E:\G\架空\中'
+  $links.Same['RJ00000003'] = 'E:\G\架空2'
+  $links.Diff['RJ00000004'] = @('E:\G\べつ', 'e:\g\架空')
+  Update-LinkPaths $links 'E:\G\架空' 'E:\G\RJ00000001 架空'
+  It 'same のパスを書き換える' { $links.Same['RJ00000001'] | Should Be 'E:\G\RJ00000001 架空' }
+  It '下にあるパスも書き換える' { $links.Same['RJ00000002'] | Should Be 'E:\G\RJ00000001 架空\中' }
+  It 'diff の要素も大文字小文字を区別せずに書き換える' { $links.Diff['RJ00000004'][1] | Should Be 'E:\G\RJ00000001 架空' }
+  It '名前の先頭が同じだけの別フォルダは書き換えない' { $links.Same['RJ00000003'] | Should Be 'E:\G\架空2' }
+}
+
+Describe 'Invoke-FolderRename / Undo-FolderRename' {
+  $g = Join-Path $TestDrive 'rn'
+  $logDir = Join-Path $TestDrive 'logs'
+  $linksPath = Join-Path $TestDrive 'owned-links.json'
+  $mk = { param($code, $old, $new) [pscustomobject]@{ Code = $code; Path = (Join-Path $g $old); OldName = $old; IsArchive = $false; How = '作品名が一致'; State = 'ok'; NewName = $new; NewPath = (Join-Path $g $new) } }
+
+  It '名前を変えて記録に done を付け、owned-links.json も新しいパスになる' {
+    New-TestDirs $g @('あ')
+    $links = New-TestLinks; $links.Same['RJ00000031'] = (Join-Path $g 'あ')
+    $r = Invoke-FolderRename @(& $mk 'RJ00000031' 'あ' 'RJ00000031 あ') $logDir $links $linksPath
+    $r.Done | Should Be 1
+    Test-Path -LiteralPath (Join-Path $g 'RJ00000031 あ') | Should Be $true
+    (Get-Content -LiteralPath $r.Log -Raw -Encoding UTF8 | ConvertFrom-Json).entries[0].done | Should Be $true
+    (Read-OwnedLinks $linksPath).Same['RJ00000031'] | Should Be (Join-Path $g 'RJ00000031 あ')
+    $script:log1 = $r.Log
+  }
+  It '戻すと元の名前とリンクに戻る' {
+    $links = Read-OwnedLinks $linksPath
+    $u = Undo-FolderRename $script:log1 $links $linksPath
+    $u.Done | Should Be 1
+    Test-Path -LiteralPath (Join-Path $g 'あ') | Should Be $true
+    (Read-OwnedLinks $linksPath).Same['RJ00000031'] | Should Be (Join-Path $g 'あ')
+  }
+  It 'ok 以外は変えない' {
+    New-TestDirs $g @('え')
+    $t = & $mk 'RJ00000035' 'え' 'RJ00000035 え'; $t.State = 'skip'
+    (Invoke-FolderRename @($t) $logDir (New-TestLinks) $linksPath).Done | Should Be 0
+    Test-Path -LiteralPath (Join-Path $g 'え') | Should Be $true
+  }
+  It '1件失敗しても残りは変える' {
+    New-TestDirs $g @('い', 'う')
+    $lockFile = Join-Path $g 'い\lock.txt'
+    [IO.File]::WriteAllText($lockFile, 'x')
+    $fs = [IO.File]::Open($lockFile, 'Open', 'Read', 'None')
+    try {
+      $r = Invoke-FolderRename @((& $mk 'RJ00000032' 'い' 'RJ00000032 い'), (& $mk 'RJ00000033' 'う' 'RJ00000033 う')) $logDir (New-TestLinks) $linksPath
+    } finally { $fs.Close() }
+    $r.Done | Should Be 1
+    @($r.Failed).Count | Should Be 1
+    $r.Failed[0].OldName | Should Be 'い'
+    $e = (Get-Content -LiteralPath $r.Log -Raw -Encoding UTF8 | ConvertFrom-Json).entries
+    @($e | Where-Object done).Count | Should Be 1
+    $script:log2 = $r.Log
+  }
+  It '戻すとき元の名前がもうあれば飛ばす' {
+    New-TestDirs $g @('う')   # 元の名前のものを作っておく
+    $u = Undo-FolderRename $script:log2 (New-TestLinks) $linksPath
+    $u.Done | Should Be 0
+    @($u.Skipped).Count | Should Be 1
+  }
+  It '戻すとき新しい名前のものがなければ飛ばす' {
+    New-TestDirs $g @('お')
+    $r = Invoke-FolderRename @(& $mk 'RJ00000036' 'お' 'RJ00000036 お') $logDir (New-TestLinks) $linksPath
+    Rename-Item -LiteralPath (Join-Path $g 'RJ00000036 お') -NewName 'てうごかし'
+    $u = Undo-FolderRename $r.Log (New-TestLinks) $linksPath
+    $u.Done | Should Be 0
+    @($u.Skipped).Count | Should Be 1
+  }
+}
