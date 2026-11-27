@@ -2,6 +2,7 @@
 # すべてこのPCの中だけで処理します。ネットにアクセスするのは「URL をまとめて追加」と「フォルダ名をそろえる」で作品名を DLsite から取るときだけです（送るのは RJ 番号だけ）。
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'owned-core.ps1')
+. (Join-Path $PSScriptRoot 'owned-identify.ps1')
 . (Join-Path $PSScriptRoot 'owned-rename.ps1')
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -14,6 +15,7 @@ $BackupDir    = Join-Path $PSScriptRoot 'bookmark-backups'
 $ReportPath   = Join-Path $PSScriptRoot 'owned-report.html'
 $LinksPath    = Join-Path $PSScriptRoot 'owned-links.json'
 $RenameLogDir = Join-Path $PSScriptRoot 'rename-logs'
+$SearchCachePath = Join-Path $PSScriptRoot 'dlsite-search-cache.json'
 
 # 「たぶん持っている」を自分で確かめた対応（読めなければ空から始める）
 try { $script:Links = Read-OwnedLinks $LinksPath } catch { $script:Links = @{ Same = @{}; Diff = @{} } }
@@ -543,9 +545,64 @@ function Move-ASFound {
 
 # ---------- フォルダ名をそろえる ----------
 
-$RenameStateText = @{ ok = '変えられる'; multi = '複数の作品に当たる'; notitle = '作品名が取れなかった'; exists = '同じ名前がもうある' }
+$RenameStateText = @{
+  ok = '変えられる'; multi = '複数の作品に当たる'; notitle = '作品名が取れなかった'; exists = '同じ名前がもうある'
+  nocode = 'RJ番号が決まっていない'; dupcode = '複数のフォルダに同じ番号'; pending = '作品名を取っていない'
+}
+$RenameClueText = @{
+  bookmark = 'ブックマークと一致'; inside = '中に書いてある'; 'search-exact' = 'DLsite で検索（一致）'
+  search = 'DLsite で検索（候補）'; manual = '自分で入れた'; '' = '見つからなかった'
+}
+# 取った正式な作品名（RJ番号 → 作品名）。画面を開き直しても取り直さない
+$script:RenameTitles = @{}
 
-# 「持っている」作品のうち RJ番号の入っていないフォルダ・アーカイブを「RJ番号 正式な作品名 v版」にそろえる。
+# 正式な作品名を、まだ取っていない番号だけ DLsite から取る（送るのは RJ番号だけ）。取れなかった数を返す
+function Update-RenameTitles([string[]]$Codes) {
+  $need = @($Codes | Where-Object { $_ -and -not $script:RenameTitles.ContainsKey($_) } | Select-Object -Unique)
+  if ($need.Count -eq 0) { return 0 }
+  $got = Get-DLsiteTitles $need
+  foreach ($k in $got.Keys) { $script:RenameTitles[$k] = $got[$k] }
+  return [int]$script:DLsiteFailedCount
+}
+
+# 検索する言葉を1件ずつ DLsite で検索し、結果を $Cache に入れて保存する。進み具合と「止める」を出す。検索した数を返す
+function Invoke-RenameSearch([string[]]$Terms, [hashtable]$Cache) {
+  $pf = New-Object System.Windows.Forms.Form
+  $pf.Text = 'DLsite で検索しています'; $pf.Font = $Font; $pf.StartPosition = 'CenterParent'
+  $pf.FormBorderStyle = 'FixedDialog'; $pf.ControlBox = $false; $pf.AutoSize = $true; $pf.AutoSizeMode = 'GrowAndShrink'
+  $pf.Padding = New-Object System.Windows.Forms.Padding((px 12))
+  $pfl = New-Flow; $pfl.FlowDirection = 'TopDown'
+  $plbl = New-Label "0 / $($Terms.Count) 件"; $plbl.MinimumSize = New-Object System.Drawing.Size((px 320), 0)
+  $script:RenameStop = $false
+  $pbtn = New-Button '止める' { $script:RenameStop = $true }
+  $pfl.Controls.Add($plbl); $pfl.Controls.Add($pbtn); $pf.Controls.Add($pfl)
+  # Show() では CenterParent が効かないので、表示してから親の真ん中に動かす
+  $pf.StartPosition = 'Manual'; $pf.Show($form)
+  $pf.Location = New-Object System.Drawing.Point(($form.Left + [int](($form.Width - $pf.Width) / 2)), ($form.Top + [int](($form.Height - $pf.Height) / 2)))
+  $form.Enabled = $false
+  $n = 0
+  try {
+    foreach ($term in $Terms) {
+      if ($script:RenameStop) { break }
+      $plbl.Text = "$n / $($Terms.Count) 件（止めても、そこまでの結果は使えます）"
+      [System.Windows.Forms.Application]::DoEvents()
+      $r = Search-DLsite $term
+      $Cache[$term] = [pscustomobject]@{ Ok = $r.Ok; At = (Get-Date -Format 'yyyy-MM-dd'); Hits = @($r.Hits) }
+      $n++
+      if ($n % 10 -eq 0) { Save-SearchCache $SearchCachePath $Cache }
+      # 次の問い合わせまで 800 ミリ秒あける（その間も「止める」を受け付ける）
+      for ($i = 0; $i -lt 8 -and -not $script:RenameStop; $i++) { Start-Sleep -Milliseconds 100; [System.Windows.Forms.Application]::DoEvents() }
+    }
+  } finally {
+    Save-SearchCache $SearchCachePath $Cache
+    $form.Enabled = $true; $pf.Close()
+  }
+  return $n
+}
+
+# 名前を変えるフォルダ・アーカイブを集め、「RJ番号 正式な作品名 v版」にそろえる。
+#   ・ブックマーク（とバックアップ）で「持っている」になった作品
+#   ・ブックマークに当たらない作品：中に書いてある RJ番号、DLsite の検索、自分で入れた番号
 # 一覧で確かめてから、チェックしたものだけ変える。変えた記録は rename-logs に残し、「フォルダ名を戻す…」で戻せる
 function Show-RenameDialog {
   if (-not $script:Results) { Show-Info '先に「チェック開始」を押してください。'; return }
@@ -556,33 +613,51 @@ function Show-RenameDialog {
     $lblStatus.Text = '名前を変えるフォルダを集めています…'; $form.Refresh()
     $cands = Get-Candidates -Reuse
     $wish = @(Get-OwnedWishlist $sources (Get-SelectedFolder) $BackupDir)
-    $targets = @(Get-RenameTargets $wish $cands ([double]$numTh.Value) $script:Links $dirs)
+    $known = @(Get-RenameTargets $wish $cands ([double]$numTh.Value) $script:Links $dirs)
+    # ブックマークで当たった候補と「たぶん」の候補は、ブックマークにない作品として扱わない
+    $excl = @(@($script:Results | Where-Object { $_.Status -in 'owned', 'maybe' -and $_.MatchPath } | ForEach-Object MatchPath) + @($known | ForEach-Object Path))
+    $lblStatus.Text = 'ブックマークにない作品を調べています…'; $form.Refresh()
+    $unknown = @(Get-UnknownTargets $cands $excl $dirs)
   } finally { $form.Cursor = 'Default' }
+  $targets = @($known + $unknown)
   if ($targets.Count -eq 0) {
     $lblStatus.Text = '名前を変えられるフォルダはありません。'
-    Show-Info "名前を変えられるフォルダはありません。`n（RJ番号が入っていない「持っている」作品だけが対象です。「たぶん持っている」は、右クリックで確かめると対象になります）"
+    Show-Info "名前を変えられるフォルダはありません。`n（名前に RJ番号が入っていない作品が見つかりませんでした。「たぶん持っている」は、右クリックで確かめると対象になります）"
     return
   }
-  $codes = @($targets | Where-Object State -eq 'pending' | ForEach-Object Code | Select-Object -Unique)
+
+  # ブックマークにない作品で番号がわからないものを DLsite で検索する（保存した結果があるものは検索しない）
+  $cache = Read-SearchCache $SearchCachePath
+  $terms = @($unknown | Where-Object { $_.State -eq 'nocode' -and $_.Term } | ForEach-Object Term | Select-Object -Unique |
+             Where-Object { -not $cache.ContainsKey($_) -or -not $cache[$_].Ok })
+  if ($terms.Count) {
+    $q = "ブックマークにない作品のうち、RJ番号がわからないもの $($terms.Count) 件を DLsite で検索します。`n" +
+         "送るのは検索する言葉（ゲームの中の作品名か、フォルダ名を整えたもの）だけです。1件に2秒ほどかかり、途中で止められます。`n`n" +
+         "検索しますか？（「いいえ」でも、一覧で自分で RJ番号を入れられます）"
+    if (Ask-YesNo $q 'DLsite で検索') { [void](Invoke-RenameSearch $terms $cache) }
+  }
+  Set-SearchResults $targets $cache
+
+  $codes = @($targets | Where-Object { $_.State -eq 'pending' } | ForEach-Object Code | Where-Object { -not $script:RenameTitles.ContainsKey($_) } | Select-Object -Unique)
   $failedFetch = 0
   if ($codes.Count) {
-    if (-not (Ask-YesNo "名前を変えられそうなフォルダが $($codes.Count) 件あります。`n正式な作品名を取るため、RJ番号 $($codes.Count) 件を DLsite に送ります（送るのは RJ番号だけ）。`n`nよろしいですか？" 'フォルダ名をそろえる')) { return }
+    if (-not (Ask-YesNo "正式な作品名を取るため、RJ番号 $($codes.Count) 件を DLsite に送ります（送るのは RJ番号だけ）。`n`nよろしいですか？" 'フォルダ名をそろえる')) { return }
     $form.Cursor = 'WaitCursor'
     try {
       $lblStatus.Text = 'DLsite から作品名を取っています…'; $form.Refresh()
-      $titles = Get-DLsiteTitles $codes
-      $failedFetch = $script:DLsiteFailedCount
+      $failedFetch = Update-RenameTitles $codes
     } finally { $form.Cursor = 'Default' }
-    Set-RenameNames $targets $titles
   }
+  Update-TargetStates $targets $script:RenameTitles
   $okN = @($targets | Where-Object State -eq 'ok').Count
-  $lblStatus.Text = "名前を変えられるフォルダ $okN 件 ／ 変えないもの $($targets.Count - $okN) 件"
+  $noN = @($targets | Where-Object State -eq 'nocode').Count
+  $lblStatus.Text = "名前を変えられるフォルダ $okN 件 ／ RJ番号が決まっていないもの $noN 件 ／ ほか $($targets.Count - $okN - $noN) 件"
 
   $dlg = New-Object System.Windows.Forms.Form
   $dlg.Text = 'フォルダ名をそろえる'
   $dlg.Font = $Font; $dlg.StartPosition = 'CenterParent'
-  $dlg.Size = New-Object System.Drawing.Size((px 980), (px 560))
-  $dlg.MinimumSize = New-Object System.Drawing.Size((px 620), (px 360))
+  $dlg.Size = New-Object System.Drawing.Size((px 1180), (px 640))
+  $dlg.MinimumSize = New-Object System.Drawing.Size((px 720), (px 400))
   $lay = New-Object System.Windows.Forms.TableLayoutPanel
   $lay.Dock = 'Fill'; $lay.ColumnCount = 1; $lay.Padding = New-Object System.Windows.Forms.Padding((px 10))
   [void]$lay.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
@@ -591,41 +666,129 @@ function Show-RenameDialog {
   $dlg.Controls.Add($lay)
 
   $note = "チェックしたフォルダの名前を「RJ番号 正式な作品名 v版」に変えます（版は今の名前から読めたときだけ）。`n" +
+          "最初からチェックが付くのは、手がかりが確かなものだけです。「DLsite で検索（候補）」の行は、RJ番号の欄で候補を選ぶか、右クリックで番号を入れてください（RJ番号の欄をダブルクリックで DLsite のページを開きます）。`n" +
           "「決め手」が「作品名が一致」のものは、同じ作品か気になるならチェックを外してください。変えた記録を残すので、「フォルダ名を戻す…」で戻せます。" +
           $(if ($failedFetch) { "`n※ $failedFetch 件は DLsite から作品名を取れませんでした（ネットにつながっているか確かめてください）。" } else { '' })
   $lay.Controls.Add((New-Label $note), 0, 0)
 
   $rg = New-Object System.Windows.Forms.DataGridView
   $rg.Dock = 'Fill'; $rg.AllowUserToAddRows = $false; $rg.AllowUserToDeleteRows = $false
-  $rg.RowHeadersVisible = $false; $rg.SelectionMode = 'FullRowSelect'; $rg.MultiSelect = $false
+  $rg.RowHeadersVisible = $false; $rg.SelectionMode = 'CellSelect'; $rg.MultiSelect = $false
   $rg.AutoSizeRowsMode = 'AllCells'; $rg.BackgroundColor = [System.Drawing.SystemColors]::Window
   $rg.ColumnHeadersHeightSizeMode = 'AutoSize'; $rg.DefaultCellStyle.WrapMode = 'True'
+  $rg.EditMode = 'EditOnEnter'
   $cc = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
   $cc.HeaderText = '変える'; $cc.Name = 'Do'; $cc.Width = (px 50)
   [void]$rg.Columns.Add($cc)
+  $col = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+  $col.Name = 'Old'; $col.HeaderText = '今の名前'; $col.Width = (px 260); $col.ReadOnly = $true
+  [void]$rg.Columns.Add($col)
+  $cb = New-Object System.Windows.Forms.DataGridViewComboBoxColumn
+  $cb.Name = 'Code'; $cb.HeaderText = 'RJ番号'; $cb.Width = (px 260); $cb.DisplayStyle = 'DropDownButton'; $cb.FlatStyle = 'Flat'
+  [void]$rg.Columns.Add($cb)
   foreach ($c in @(
-    @{ N = 'Old';   H = '今の名前';     W = 300 },
-    @{ N = 'New';   H = '新しい名前';   W = 320 },
-    @{ N = 'How';   H = '決め手';       W = 110 },
-    @{ N = 'State'; H = '状態';         W = 140 }
+    @{ N = 'New';   H = '新しい名前'; W = 300 },
+    @{ N = 'Clue';  H = '手がかり';   W = 150 },
+    @{ N = 'How';   H = '決め手';     W = 100 },
+    @{ N = 'State'; H = '状態';       W = 150 }
   )) {
     $col = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
     $col.Name = $c.N; $col.HeaderText = $c.H; $col.Width = (px $c.W); $col.ReadOnly = $true
     [void]$rg.Columns.Add($col)
   }
   $rg.Columns['Old'].AutoSizeMode = 'Fill'; $rg.Columns['New'].AutoSizeMode = 'Fill'
-  foreach ($t in @($targets | Sort-Object @{ e = { $_.State -ne 'ok' } }, OldName)) {
-    $ok = $t.State -eq 'ok'
-    $i = $rg.Rows.Add($ok, $t.OldName, $t.NewName, $t.How, $RenameStateText[$t.State])
-    $row = $rg.Rows[$i]; $row.Tag = $t
-    if (-not $ok) { $row.Cells['Do'].ReadOnly = $true; $row.DefaultCellStyle.ForeColor = [System.Drawing.SystemColors]::GrayText }
+  # 選べない値などで出る表示のエラーは出さない
+  $rg.Add_DataError({ param($s, $e) $e.ThrowException = $false })
+
+  # 行の RJ番号の候補（「RJ… 作品名」）。今の番号が候補になければ先頭に足す
+  $choiceText = { param($t)
+    $items = @(@($t.Choices) | Where-Object { $_ } | ForEach-Object { if ($_.Title) { "$($_.Code) $($_.Title)" } else { [string]$_.Code } })
+    if ($t.Code -and -not @($items | Where-Object { $_ -eq $t.Code -or $_.StartsWith($t.Code + ' ') }).Count) {
+      $label = if ($script:RenameTitles[$t.Code]) { "$($t.Code) $($script:RenameTitles[$t.Code])" } else { [string]$t.Code }
+      $items = @($label) + $items
+    }
+    return ,$items
   }
-  # 今の名前をダブルクリックで、その場所をエクスプローラーで開く
-  $rg.Add_CellDoubleClick({ param($s, $e) Invoke-Safe {
-    if ($e.RowIndex -lt 0 -or $rg.Columns[$e.ColumnIndex].Name -eq 'Do') { return }
-    Start-Process explorer.exe "/select,`"$($rg.Rows[$e.RowIndex].Tag.Path)`""
-  } })
+  # 行の表示を、その行の対象（Tag）に合わせる
+  $paintRow = { param($row)
+    $t = $row.Tag
+    $cell = $row.Cells['Code']
+    $items = & $choiceText $t
+    $cell.Items.Clear()
+    foreach ($it in $items) { [void]$cell.Items.Add($it) }
+    $cell.Value = $(if ($t.Code) { @($items | Where-Object { $_ -eq $t.Code -or $_.StartsWith($t.Code + ' ') })[0] } else { $null })
+    $cell.ReadOnly = $t.State -eq 'multi' -or $t.Clue -eq 'bookmark' -or $items.Count -eq 0
+    $row.Cells['New'].Value = $t.NewName
+    $row.Cells['Clue'].Value = $RenameClueText[[string]$t.Clue]
+    $row.Cells['How'].Value = $t.How
+    $row.Cells['State'].Value = $RenameStateText[$t.State]
+    $ok = $t.State -eq 'ok'
+    $row.Cells['Do'].ReadOnly = -not $ok
+    if (-not $ok) { $row.Cells['Do'].Value = $false }
+    $row.DefaultCellStyle.ForeColor = $(if ($ok -or $t.State -eq 'nocode') { [System.Drawing.SystemColors]::ControlText } else { [System.Drawing.SystemColors]::GrayText })
+  }
+  # 番号を決めた・変えたあと：作品名を取り、全部の行の状態を作り直して描き直す。その行はチェックを付ける
+  $applyCode = { param($row, [string]$text, [bool]$manual)
+    $t = $row.Tag
+    $clue = $t.Clue
+    if (-not (Set-TargetCode $t $text)) { Show-Info 'RJ番号（RJ01234567 など）か、DLsite の作品ページの URL を入れてください。'; return }
+    if (-not $manual) { $t.Clue = $(if ($clue -eq 'inside') { 'inside' } else { 'search' }) }
+    if (-not $script:RenameTitles.ContainsKey($t.Code)) {
+      $dlg.Cursor = 'WaitCursor'
+      try { [void](Update-RenameTitles @($t.Code)) } finally { $dlg.Cursor = 'Default' }
+    }
+    Update-TargetStates $targets $script:RenameTitles
+    $script:RenameFilling = $true
+    try {
+      $keep = @{}
+      foreach ($r in $rg.Rows) { $keep[$r.Index] = [bool]$r.Cells['Do'].Value }
+      foreach ($r in $rg.Rows) { & $paintRow $r; if ($r.Tag.State -eq 'ok' -and $keep[$r.Index]) { $r.Cells['Do'].Value = $true } }
+      if ($t.State -eq 'ok') { $row.Cells['Do'].Value = $true }
+    } finally { $script:RenameFilling = $false }
+    $btnGo.Enabled = @($targets | Where-Object State -eq 'ok').Count -gt 0
+  }
+
+  $script:RenameFilling = $true
+  foreach ($t in @($targets | Sort-Object @{ e = { $_.State -ne 'ok' } }, @{ e = { $_.State -ne 'nocode' } }, OldName)) {
+    $i = $rg.Rows.Add()
+    $row = $rg.Rows[$i]; $row.Tag = $t; $row.Cells['Old'].Value = $t.OldName
+    & $paintRow $row
+    if ($t.State -eq 'ok' -and $t.Auto) { $row.Cells['Do'].Value = $true }
+  }
+  $script:RenameFilling = $false
+
   $rg.Add_CurrentCellDirtyStateChanged({ if ($rg.IsCurrentCellDirty) { $rg.CommitEdit('CurrentCellChange') } })
+  $rg.Add_CellValueChanged({ param($s, $e) Invoke-Safe {
+    if ($script:RenameFilling -or $e.RowIndex -lt 0 -or $rg.Columns[$e.ColumnIndex].Name -ne 'Code') { return }
+    $row = $rg.Rows[$e.RowIndex]
+    $v = [string]$row.Cells['Code'].Value
+    if ($v -and $v -notmatch ('^' + [regex]::Escape([string]$row.Tag.Code) + '(\s|$)')) { & $applyCode $row $v $false }
+    elseif ($v -and -not $row.Tag.Code) { & $applyCode $row $v $false }
+  } })
+  $rg.Add_CellDoubleClick({ param($s, $e) Invoke-Safe {
+    if ($e.RowIndex -lt 0) { return }
+    $t = $rg.Rows[$e.RowIndex].Tag
+    $name = $rg.Columns[$e.ColumnIndex].Name
+    if ($name -eq 'Code' -and $t.Code) { Start-Process "https://www.dlsite.com/maniax/work/=/product_id/$($t.Code).html" }
+    elseif ($name -eq 'Old') { Start-Process explorer.exe "/select,`"$($t.Path)`"" }
+  } })
+  # 右クリック：RJ番号を自分で入れる
+  $rmenu = New-Object System.Windows.Forms.ContextMenuStrip
+  $rmenu.Font = $Font
+  $miCode = $rmenu.Items.Add('RJ番号を入れる…（DLsite の URL でもよい）')
+  $rg.ContextMenuStrip = $rmenu
+  $script:RenameMenuRow = -1
+  $rg.Add_CellMouseDown({ param($s, $e) if ($e.Button -eq 'Right' -and $e.RowIndex -ge 0) { $script:RenameMenuRow = $e.RowIndex } })
+  $rmenu.Add_Opening({ param($s, $e)
+    $r = $script:RenameMenuRow
+    if ($r -lt 0 -or $r -ge $rg.Rows.Count -or $rg.Rows[$r].Tag.Clue -eq 'bookmark' -or $rg.Rows[$r].Tag.State -eq 'multi') { $e.Cancel = $true }
+  })
+  $miCode.Add_Click({ Invoke-Safe {
+    $row = $rg.Rows[$script:RenameMenuRow]
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    $v = [Microsoft.VisualBasic.Interaction]::InputBox("「$($row.Tag.OldName)」の RJ番号か、DLsite の作品ページの URL:", 'RJ番号を入れる', [string]$row.Tag.Code)
+    if ($v.Trim()) { & $applyCode $row $v $true }
+  } })
   $lay.Controls.Add($rg, 0, 1)
 
   $btns = New-Flow
@@ -636,8 +799,10 @@ function Show-RenameDialog {
     if ($chosen.Count -eq 0) { Show-Info '名前を変えるフォルダにチェックを入れてください。'; return }
     if (-not (Ask-YesNo "$($chosen.Count) 件のフォルダ・ファイルの名前を変えます。`n（ゲームを起動中のものは変えられません。閉じてから進めてください）`n`nよろしいですか？" '名前を変える確認')) { return }
     foreach ($row in $rg.Rows) { if ($row.Tag.State -eq 'ok' -and -not [bool]$row.Cells['Do'].Value) { $row.Tag.State = 'skip' } }
-    $dlg.Close()
-    $r = Invoke-FolderRename $targets $RenameLogDir $script:Links $LinksPath
+    # Close() はこの処理が終わるまで閉じないので、先に隠して待機カーソルを出す
+    $dlg.Hide(); $dlg.Close()
+    $form.Cursor = 'WaitCursor'
+    try { $r = Invoke-FolderRename $targets $RenameLogDir $script:Links $LinksPath } finally { $form.Cursor = 'Default' }
     $msg = "$($r.Done) 件の名前を変えました。"
     if (@($r.Failed).Count) {
       $msg += "`n`n変えられなかったもの $(@($r.Failed).Count) 件:`n" + ((@($r.Failed) | Select-Object -First 10 | ForEach-Object { "・$($_.OldName)`n  → $($_.Reason)" }) -join "`n")
