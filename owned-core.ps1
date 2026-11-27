@@ -272,6 +272,20 @@ function Get-FolderVersion([string]$Name) {
 #   ・フォルダ名に RJ番号が入っているもの
 # 戻り値: Code / Path / Name / Version（フォルダ名から読んだ版）の一覧
 function Get-OwnedWorks([string[]]$Sources, [string]$Folder, [string]$BackupDir, $Candidates, [double]$Threshold, $Links) {
+  $out = [ordered]@{}
+  foreach ($r in @(Compare-Owned @(Get-OwnedWishlist $Sources $Folder $BackupDir) $Candidates $Threshold $Links)) {
+    if ($r.Status -eq 'owned') { $out[$r.Code] = [pscustomobject]@{ Code = $r.Code; Path = $r.MatchPath; Name = $r.Match } }
+  }
+  foreach ($c in @($Candidates | ForEach-Object { $_ })) {
+    if ($c.Code -and -not $out.Contains($c.Code)) { $out[$c.Code] = [pscustomobject]@{ Code = $c.Code; Path = $c.Path; Name = $c.Name } }
+  }
+  foreach ($o in $out.Values) { $o | Add-Member -NotePropertyName Version -NotePropertyValue (Get-FolderVersion $o.Name) }
+  return @($out.Values)
+}
+
+# 持っている作品を探すための作品の一覧：今の気になるリストと、ブックマークのバックアップ（消したブックマーク＝持っている作品が残っている）
+# 同じ RJ番号は1つにまとめる（作品名がわからないものは、ほかで見つかった作品名で埋める）。Read-Wishlist と同じ形
+function Get-OwnedWishlist([string[]]$Sources, [string]$Folder, [string]$BackupDir) {
   $wish = [ordered]@{}
   foreach ($w in @(Read-Wishlist $Sources $Folder)) { if (-not $wish.Contains($w.Code)) { $wish[$w.Code] = $w } }
   if ($BackupDir -and (Test-Path -LiteralPath $BackupDir)) {
@@ -283,15 +297,7 @@ function Get-OwnedWorks([string[]]$Sources, [string]$Folder, [string]$BackupDir,
       }
     }
   }
-  $out = [ordered]@{}
-  foreach ($r in @(Compare-Owned @($wish.Values) $Candidates $Threshold $Links)) {
-    if ($r.Status -eq 'owned') { $out[$r.Code] = [pscustomobject]@{ Code = $r.Code; Path = $r.MatchPath; Name = $r.Match } }
-  }
-  foreach ($c in @($Candidates | ForEach-Object { $_ })) {
-    if ($c.Code -and -not $out.Contains($c.Code)) { $out[$c.Code] = [pscustomobject]@{ Code = $c.Code; Path = $c.Path; Name = $c.Name } }
-  }
-  foreach ($o in $out.Values) { $o | Add-Member -NotePropertyName Version -NotePropertyValue (Get-FolderVersion $o.Name) }
-  return @($out.Values)
+  return @($wish.Values)
 }
 
 # ---------- 3d. AS Patch Finder の検索結果（TSV）を読む ----------

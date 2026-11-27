@@ -31,3 +31,54 @@ function New-RenameName([string]$Code, [string]$Title, [string]$OldName, [bool]$
   if ($t.Length -gt $room) { $t = (ConvertTo-SafeFileName $t.Substring(0, [Math]::Max(1, $room))) }
   return "$Code $t$tail"
 }
+
+# ---------- 2. 名前を変える対象を選ぶ ----------
+
+# 対象：照らし合わせで「持っている」になった作品（RJ番号の一致・作品名の完全一致・確かめた対応）の、名前に RJ番号がない手元の候補
+#   ・1つの候補に2つ以上の作品が当たったら、変えずに State = 'multi'（違う RJ番号を付けないため）
+#   ・候補のすぐ外側も同じ名前の候補なら（二重に展開した「作品\作品」）、外側を対象にする
+#   ・② に登録したゲームフォルダそのものは対象にしない
+# 戻り値: Code / Path / OldName / IsArchive / How / State（'pending' か 'multi'） / NewName / NewPath の一覧
+function Get-RenameTargets($Wishlist, $Candidates, [double]$Threshold, $Links, [string[]]$GameDirs) {
+  $cl = @($Candidates | ForEach-Object { $_ })
+  $byPath = @{}
+  foreach ($c in $cl) { if (-not $byPath.ContainsKey([string]$c.Path)) { $byPath[[string]$c.Path] = $c } }
+  $roots = @{}
+  foreach ($d in @($GameDirs)) { if ($d) { $roots[$d.TrimEnd('\')] = $true } }
+  $groups = [ordered]@{}
+  foreach ($r in @(Compare-Owned @($Wishlist) $cl $Threshold $Links)) {
+    if ($r.Status -ne 'owned' -or -not $r.MatchPath) { continue }
+    $c = $byPath[[string]$r.MatchPath]
+    if (-not $c -or $c.Code) { continue }
+    $parent = Split-Path -Parent $c.Path
+    $pc = $byPath[$parent]
+    if ($pc -and -not $pc.Code -and $pc.Norm -eq $c.Norm) { $c = $pc }
+    if ($roots.ContainsKey(([string]$c.Path).TrimEnd('\'))) { continue }
+    $key = [string]$c.Path
+    if (-not $groups.Contains($key)) { $groups[$key] = @{ Cand = $c; Hits = New-Object System.Collections.Generic.List[object] } }
+    if (-not @($groups[$key].Hits | Where-Object Code -eq $r.Code).Count) { $groups[$key].Hits.Add($r) }
+  }
+  foreach ($g in $groups.Values) {
+    $c = $g.Cand
+    $isArchive = -not (Test-Path -LiteralPath $c.Path -PathType Container)
+    $oldName = Split-Path -Leaf $c.Path
+    $state = if ($g.Hits.Count -gt 1) { 'multi' } else { 'pending' }
+    foreach ($r in $g.Hits) {
+      [pscustomobject]@{ Code = $r.Code; Path = [string]$c.Path; OldName = $oldName; IsArchive = $isArchive; How = $r.How; State = $state; NewName = ''; NewPath = '' }
+    }
+  }
+}
+
+# State = 'pending' の対象に新しい名前を入れる。$Titles: @{ RJ番号 = 正式な作品名 }（Get-DLsiteTitles の戻り値）
+#   作品名が取れなかった → 'notitle'、同じ名前のものがもうある → 'exists'、それ以外 → 'ok'
+function Set-RenameNames($Targets, [hashtable]$Titles) {
+  foreach ($t in @($Targets)) {
+    if ($t.State -ne 'pending') { continue }
+    $title = $Titles[$t.Code]
+    if (-not $title) { $t.State = 'notitle'; continue }
+    $parent = Split-Path -Parent $t.Path
+    $t.NewName = New-RenameName $t.Code $title $t.OldName $t.IsArchive $parent
+    $t.NewPath = Join-Path $parent $t.NewName
+    $t.State = if (Test-Path -LiteralPath $t.NewPath) { 'exists' } else { 'ok' }
+  }
+}
