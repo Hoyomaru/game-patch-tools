@@ -594,10 +594,10 @@ function Invoke-RenameSearch([string[]]$Terms, [hashtable]$Cache) {
       if ($script:RenameStop) { break }
       $plbl.Text = "$n / $($Terms.Count) 件（止めても、そこまでの結果は使えます）"
       [System.Windows.Forms.Application]::DoEvents()
-      $r = Search-DLsite $term
+      $r = Search-DLsite $term -Pump { [System.Windows.Forms.Application]::DoEvents() }
       $Cache[$term] = [pscustomobject]@{ Ok = $r.Ok; At = (Get-Date -Format 'yyyy-MM-dd'); Hits = @($r.Hits) }
       $n++
-      # つながらないことが3回続いたら止める（1件で最大 20 秒待つため）
+      # つながらないことが3回続いたら止める（1件で最大 10 秒待つため）
       if ($r.Ok) { $failRun = 0 } else { $failRun++; if ($failRun -ge 3) { $gaveUp = $true; break } }
       if ($n % 10 -eq 0) { try { Save-SearchCache $SearchCachePath $Cache } catch { } }
       # 次の問い合わせまで 800 ミリ秒あける（その間も「止める」を受け付ける）
@@ -631,7 +631,7 @@ function Show-RenameDialog {
     $lblStatus.Text = 'ブックマークにない作品を調べています…'; $form.Refresh()
     $unknown = @(Get-UnknownTargets $cands $excl $dirs {
       param($i, $n)
-      if ($i % 5 -eq 1 -or $i -eq $n) { $lblStatus.Text = "ブックマークにない作品を調べています…（$i / $n）"; [System.Windows.Forms.Application]::DoEvents() }
+      $lblStatus.Text = "ブックマークにない作品を調べています…（$i / $n）"; [System.Windows.Forms.Application]::DoEvents()
     })
   } finally { $form.Cursor = 'Default' }
   $targets = @($known + $unknown)
@@ -647,7 +647,7 @@ function Show-RenameDialog {
              Where-Object { -not $cache.ContainsKey($_) -or -not $cache[$_].Ok })
   if ($terms.Count) {
     $q = "ブックマークにない作品のうち、RJ番号がわからないもの $($terms.Count) 件を DLsite で検索します。`n" +
-         "送るのは検索する言葉（ゲームの中の作品名か、フォルダ名を整えたもの）だけです。1件に2秒ほどかかり、途中で止められます。`n`n" +
+         "送るのは検索する言葉（ゲームの中の作品名か、フォルダ名を整えたもの）だけです。1件に1秒ほどかかり、途中で止められます。`n`n" +
          "検索しますか？（「いいえ」でも、一覧で自分で RJ番号を入れられます）"
     if (Ask-YesNo $q 'DLsite で検索') { [void](Invoke-RenameSearch $terms $cache) }
   }

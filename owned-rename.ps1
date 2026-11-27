@@ -107,11 +107,18 @@ function New-RenameTarget([string]$Code, [string]$Path, [string]$OldName, [bool]
 #   それ以外 → State = 'nocode'。中で2つ以上見つかった番号は Choices に。Term はゲームの中の作品名、なければフォルダ名から作る
 function Get-UnknownTargets($Candidates, [string[]]$ExcludePaths, [string[]]$GameDirs, [scriptblock]$OnProgress = $null) {
   $ws = @(Get-UnknownWorks $Candidates $ExcludePaths $GameDirs)
-  $i = 0
+  # 中の RJ番号は、何作品かずつまとめて同時に調べる（間に進み具合を出す）
+  $inside = @{}
+  $step = [Math]::Max(1, 4 * $script:InsideParallel)
+  for ($k = 0; $k -lt $ws.Count; $k += $step) {
+    if ($OnProgress) { & $OnProgress $k $ws.Count }
+    $part = @($ws[$k..([Math]::Min($k + $step, $ws.Count) - 1)] | ForEach-Object Path)
+    $r = Find-InsideCodesMany $part
+    foreach ($p in $r.Keys) { $inside[$p] = $r[$p] }
+  }
+  if ($OnProgress -and $ws.Count) { & $OnProgress $ws.Count $ws.Count }
   foreach ($w in $ws) {
-    $i++
-    if ($OnProgress) { & $OnProgress $i $ws.Count }
-    $codes = @(Find-InsideCodes $w.Path)
+    $codes = @($inside[$w.Path])
     if ($codes.Count -eq 1) {
       New-RenameTarget $codes[0] $w.Path $w.OldName $w.IsArchive '' 'pending' 'inside' $true
       continue

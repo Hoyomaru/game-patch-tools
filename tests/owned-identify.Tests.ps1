@@ -58,6 +58,16 @@ Describe 'Find-InsideCodes' {
   It '2つあれば両方返す（大文字にそろえる）' { @(Find-InsideCodes (Join-Path $g 'c')) -join ',' | Should Be 'RJ00000103,RJ00000104' }
   It '大きいファイルは読まない' { @(Find-InsideCodes (Join-Path $g 'd')).Count | Should Be 0 }
   It 'アーカイブなら空' { New-TestFile (Join-Path $g 'x.zip'); @(Find-InsideCodes (Join-Path $g 'x.zip')).Count | Should Be 0 }
+  It 'まとめて調べても1つずつと同じ（パスごと）' {
+    New-TestFile (Join-Path $g 'y.zip')
+    $paths = 'a', 'b', 'c', 'd', 'y.zip' | ForEach-Object { Join-Path $g $_ }
+    $r = Find-InsideCodesMany $paths
+    $r.Count | Should Be 5
+    @($r[$paths[0]]) -join ',' | Should Be 'RJ00000101'
+    @($r[$paths[2]]) -join ',' | Should Be 'RJ00000103,RJ00000104'
+    @($r[$paths[3]]).Count | Should Be 0
+    @($r[$paths[4]]).Count | Should Be 0
+  }
 }
 
 Describe 'Get-InnerGameTitle' {
@@ -158,4 +168,26 @@ Describe 'Get-DLsiteSearchUrl' {
   It '空白は + にする' { Get-DLsiteSearchUrl 'maniax' 'magic girl' | Should Be 'https://www.dlsite.com/maniax/fsr/ajax/=/language/jp/keyword/magic+girl/' }
   It '+ そのものは %2B のまま' { Get-DLsiteSearchUrl 'home' 'A+B' | Should Be 'https://www.dlsite.com/home/fsr/ajax/=/language/jp/keyword/A%2BB/' }
   It '日本語と / は % で表す' { Get-DLsiteSearchUrl 'maniax' 'テスト/1' | Should Be 'https://www.dlsite.com/maniax/fsr/ajax/=/language/jp/keyword/%E3%83%86%E3%82%B9%E3%83%88%2F1/' }
+}
+
+Describe 'Search-DLsite（問い合わせを差し替えて）' {
+  $json = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\dlsite-search-sample.json'))
+  It '2つの売り場の URL を1回でまとめて渡し、R18 → 全年齢の順に並べる' {
+    $script:seen = $null
+    $r = Search-DLsite 'magic girl' -Fetch { param([string[]]$Urls) $script:seen = $Urls; @($json, $json) }
+    @($script:seen).Count | Should Be 2
+    $script:seen[0] | Should Be (Get-DLsiteSearchUrl 'maniax' 'magic girl')
+    $script:seen[1] | Should Be (Get-DLsiteSearchUrl 'home' 'magic girl')
+    $r.Ok | Should Be $true
+    $n = @(ConvertFrom-DLsiteSearch $json).Count
+    @($r.Hits).Count | Should Be (2 * $n)
+    $r.Hits[0].Floor | Should Be 'maniax'
+    $r.Hits[$n].Floor | Should Be 'home'
+  }
+  It '片方の返事が取れなければ Ok は偽で、取れた分は返す' {
+    $r = Search-DLsite 'x' -Fetch { param([string[]]$Urls) @($null, $json) }
+    $r.Ok | Should Be $false
+    @($r.Hits).Count | Should Be @(ConvertFrom-DLsiteSearch $json).Count
+    $r.Hits[0].Floor | Should Be 'home'
+  }
 }

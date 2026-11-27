@@ -99,27 +99,70 @@ $script:InsideMaxFiles = 5000
 
 # フォルダの中のファイル名（$script:InsideMaxFiles 個まで）と、小さなテキストファイル（200KB 未満、50 個まで）の中身から RJ番号を探す。
 # 戻り値: 見つけた順の RJ番号（大文字・重複なし）。アーカイブなら空
+# ゲームは1作品で数万ファイルあることがあり、PowerShell のループでは遅いので、数える・読むところは C#（OwnedInside）で行う
+if (-not ('OwnedInside' -as [type])) {
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.RegularExpressions;
+public static class OwnedInside {
+  public static string[] Find(string path, string pattern, int maxFiles, string[] textExt, long maxTextBytes, int maxTexts) {
+    var found = new List<string>();
+    if (!Directory.Exists(path)) return found.ToArray();
+    var re = new Regex(pattern, RegexOptions.IgnoreCase);
+    var exts = new HashSet<string>(textExt, StringComparer.OrdinalIgnoreCase);
+    // 浅い階層から順に見る（readme などは浅いところにあることが多い）
+    var files = new List<FileInfo>();
+    var queue = new Queue<string>();
+    queue.Enqueue(path);
+    while (queue.Count > 0 && files.Count < maxFiles) {
+      var d = new DirectoryInfo(queue.Dequeue());
+      try {
+        foreach (var f in d.EnumerateFiles()) { if (files.Count >= maxFiles) break; files.Add(f); }
+        foreach (var s in d.EnumerateDirectories()) queue.Enqueue(s.FullName);
+      } catch { }
+    }
+    foreach (var f in files) Add(found, re, f.Name);
+    int n = 0;
+    foreach (var f in files) {
+      if (n >= maxTexts) break;
+      long len; try { len = f.Length; } catch { continue; }
+      if (len >= maxTextBytes || !exts.Contains(f.Extension)) continue;
+      n++;
+      try { Add(found, re, File.ReadAllText(f.FullName)); } catch { }
+    }
+    return found.ToArray();
+  }
+  // 何作品かを同時に調べる（ゲームフォルダが NAS などにあると、1ファイルごとの待ちが長いため）
+  public static string[][] FindMany(string[] paths, string pattern, int maxFiles, string[] textExt, long maxTextBytes, int maxTexts, int parallel) {
+    var result = new string[paths.Length][];
+    var opt = new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, parallel) };
+    System.Threading.Tasks.Parallel.For(0, paths.Length, opt, i => {
+      try { result[i] = Find(paths[i], pattern, maxFiles, textExt, maxTextBytes, maxTexts); } catch { result[i] = new string[0]; }
+    });
+    return result;
+  }
+  static void Add(List<string> found, Regex re, string s) {
+    foreach (Match m in re.Matches(s)) { var c = m.Groups[1].Value.ToUpperInvariant(); if (!found.Contains(c)) found.Add(c); }
+  }
+}
+'@
+}
 function Find-InsideCodes([string]$Path) {
-  $found = New-Object System.Collections.Generic.List[string]
-  if (-not [IO.Directory]::Exists($Path)) { return $found.ToArray() }
-  $add = { param([string]$s) foreach ($m in [regex]::Matches($s, $script:CodeRe, 'IgnoreCase')) { $c = $m.Groups[1].Value.ToUpperInvariant(); if (-not $found.Contains($c)) { $found.Add($c) } } }
-  # 浅い階層から順に見る（readme などは浅いところにあることが多い）
-  $files = New-Object System.Collections.Generic.List[IO.FileInfo]
-  $queue = New-Object System.Collections.Generic.Queue[string]
-  $queue.Enqueue($Path)
-  while ($queue.Count -and $files.Count -lt $script:InsideMaxFiles) {
-    $d = New-Object IO.DirectoryInfo $queue.Dequeue()
-    try {
-      foreach ($f in $d.EnumerateFiles()) { if ($files.Count -ge $script:InsideMaxFiles) { break }; $files.Add($f) }
-      foreach ($s in $d.EnumerateDirectories()) { $queue.Enqueue($s.FullName) }
-    } catch { }
-  }
-  foreach ($f in $files) { & $add $f.Name }
-  $texts = @($files | Where-Object { $_.Length -lt 200KB -and $script:InsideTextExt -contains $_.Extension.ToLowerInvariant() } | Select-Object -First 50)
-  foreach ($f in $texts) {
-    try { & $add ([IO.File]::ReadAllText($f.FullName)) } catch { }
-  }
-  return $found.ToArray()
+  return [OwnedInside]::Find($Path, $script:CodeRe, $script:InsideMaxFiles, [string[]]$script:InsideTextExt, 200KB, 50)
+}
+
+# 同時に調べる作品の数
+$script:InsideParallel = 8
+
+# Find-InsideCodes を何作品か同時に行う。戻り値: パス → RJ番号の配列 のハッシュテーブル
+function Find-InsideCodesMany([string[]]$Paths) {
+  $out = @{}
+  if (-not $Paths -or $Paths.Count -eq 0) { return $out }
+  $r = [OwnedInside]::FindMany($Paths, $script:CodeRe, $script:InsideMaxFiles, [string[]]$script:InsideTextExt, 200KB, 50, $script:InsideParallel)
+  for ($i = 0; $i -lt $Paths.Count; $i++) { $out[$Paths[$i]] = $r[$i] }
+  return $out
 }
 
 function Read-JsonFile([string]$Path) {
@@ -186,30 +229,50 @@ function ConvertFrom-DLsiteSearch([string]$Json) {
   return $out.ToArray()
 }
 
-# 検索する言葉で DLsite の R18 と全年齢の売り場を検索する（送るのは言葉だけ）。問い合わせの間は 800 ミリ秒あける。
-# 戻り値: Ok（どちらも返事が取れたか）/ Hits（Code / Title / Floor の一覧。取れた分）
 # DLsite の検索の URL。空白を %20 にすると DLsite が 403 で断るので + にする（+ そのものは %2B になる）
 function Get-DLsiteSearchUrl([string]$Floor, [string]$Term) {
   return "https://www.dlsite.com/$Floor/fsr/ajax/=/language/jp/keyword/$([uri]::EscapeDataString($Term) -replace '%20', '+')/"
 }
 
-function Search-DLsite([string]$Term, [int]$TimeoutSec = 10) {
+# いくつかの URL を同時に取る。戻り値: URL と同じ順の本文（取れなかったものは $null）。
+# 待っている間は $Pump を呼ぶ（画面が止まらないように DoEvents を渡す）
+function Get-WebTextsAsync([string[]]$Urls, [int]$TimeoutSec = 10, [scriptblock]$Pump = $null) {
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  Add-Type -AssemblyName System.Net.Http
+  $client = New-Object System.Net.Http.HttpClient
+  try {
+    $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
+    [void]$client.DefaultRequestHeaders.UserAgent.TryParseAdd('Mozilla/5.0')
+    $tasks = @(foreach ($u in $Urls) { $client.GetAsync($u) })
+    while (@($tasks | Where-Object { -not $_.IsCompleted }).Count) {
+      if ($Pump) { & $Pump }
+      Start-Sleep -Milliseconds 30
+    }
+    $out = New-Object 'object[]' $Urls.Count
+    for ($i = 0; $i -lt $tasks.Count; $i++) {
+      $t = $tasks[$i]
+      if ($t.Status -ne 'RanToCompletion' -or -not $t.Result.IsSuccessStatusCode) { continue }
+      try { $out[$i] = [Text.Encoding]::UTF8.GetString($t.Result.Content.ReadAsByteArrayAsync().Result) } catch { }
+    }
+    return $out
+  } finally { $client.Dispose() }
+}
+
+# 検索する言葉で DLsite の R18 と全年齢の売り場を同時に検索する（送るのは言葉だけ）。
+# $Fetch は URL の配列を受け取り、同じ順の本文（取れなければ $null）を返す（テストで差し替える）
+# 戻り値: Ok（どちらも返事が取れたか）/ Hits（Code / Title / Floor の一覧。R18 → 全年齢の順。取れた分）
+function Search-DLsite([string]$Term, [int]$TimeoutSec = 10, [scriptblock]$Pump = $null, [scriptblock]$Fetch = $null) {
+  $floors = @($script:SearchFloors)
+  $urls = [string[]]@($floors | ForEach-Object { Get-DLsiteSearchUrl $_ $Term })
+  $texts = if ($Fetch) { @(& $Fetch $urls) } else { @(Get-WebTextsAsync $urls $TimeoutSec $Pump) }
   $ok = $true
   $hits = New-Object System.Collections.Generic.List[object]
-  $first = $true
-  foreach ($floor in $script:SearchFloors) {
-    if (-not $first) { Start-Sleep -Milliseconds 800 }
-    $first = $false
-    $url = Get-DLsiteSearchUrl $floor $Term
-    try {
-      $res = Invoke-WebRequest -Uri $url -UseBasicParsing -UserAgent 'Mozilla/5.0' -TimeoutSec $TimeoutSec
-      $ms = New-Object IO.MemoryStream
-      $res.RawContentStream.Position = 0; $res.RawContentStream.CopyTo($ms)
-      foreach ($h in @(ConvertFrom-DLsiteSearch ([Text.Encoding]::UTF8.GetString($ms.ToArray())))) {
-        $hits.Add([pscustomobject]@{ Code = $h.Code; Title = $h.Title; Floor = $floor })
-      }
-    } catch { $ok = $false }
+  for ($i = 0; $i -lt $floors.Count; $i++) {
+    $body = if ($i -lt $texts.Count) { $texts[$i] } else { $null }
+    if ($null -eq $body) { $ok = $false; continue }
+    foreach ($h in @(ConvertFrom-DLsiteSearch ([string]$body))) {
+      $hits.Add([pscustomobject]@{ Code = $h.Code; Title = $h.Title; Floor = $floors[$i] })
+    }
   }
   return [pscustomobject]@{ Ok = $ok; Hits = $hits.ToArray() }
 }
