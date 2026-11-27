@@ -13,11 +13,13 @@
 function ConvertTo-StoreCode([string]$Text) {
   if (-not $Text) { return '' }
   if ($Text -match $script:CodeRe) { return $Matches[1].ToUpperInvariant() }
-  if ($Text -match '(?i)store\.steampowered\.com/app/(\d+)') { return "Steam $($Matches[1])" }
+  if ($Text -match '(?i)store\.steampowered\.com/(?:agecheck/)?app/(\d+)') { return "Steam $($Matches[1])" }
   if ($Text -match '(?i)^\s*steam\s*(\d+)\s*$') { return "Steam $($Matches[1])" }
   if ($Text -match '(?i)dlsoft\.dmm\.co\.jp/detail/([a-z0-9_]+)') { return "FANZA $($Matches[1].ToLowerInvariant())" }
   if ($Text -match '(?i)dmm\.co\.jp/.*[/?&]cid=([a-z0-9_]+)') { return "FANZA $($Matches[1].ToLowerInvariant())" }
   if ($Text -match '(?i)^\s*(d_\d+)\s*$') { return "FANZA $($Matches[1].ToLowerInvariant())" }
+  # 一覧の「FANZA 番号」をそのまま入れたとき
+  if ($Text -match '(?i)^\s*fanza\s+([a-z0-9_]+)\s*$') { return "FANZA $($Matches[1].ToLowerInvariant())" }
   return ''
 }
 
@@ -57,14 +59,21 @@ function ConvertFrom-SteamAppDetails([string]$Json, [string]$AppId) {
 }
 
 # FANZA の作品ページの作品名。見出し（h1）を使い、なければ og:title（長いと途中で切れる）。どちらもなければ ''（年齢確認のページなど）
+#   見出しが作品名でない（年齢認証・サイトの名前など）ことがあるので、使う h1 は
+#   class に productTitle があるもの、または og:title（末尾の「...」を除く）と同じ書き出しのものだけ
 function ConvertFrom-FanzaPage([string]$Html) {
-  $m = [regex]::Match($Html, '<h1[^>]*>(.*?)</h1>', 'Singleline')
-  if ($m.Success) {
-    $t = [System.Web.HttpUtility]::HtmlDecode(($m.Groups[1].Value -replace '<[^>]+>', '' -replace '\s+', ' ')).Trim()
-    if ($t) { return $t }
+  $og = ''
+  if ($Html -match '<meta\s+property="og:title"\s+content="([^"]*)"') { $og = [System.Web.HttpUtility]::HtmlDecode($Matches[1]).Trim() }
+  $stem = ($og -replace '(\.\.\.|…)\s*$', '').Trim()
+  $byStem = ''
+  foreach ($m in [regex]::Matches($Html, '<h1([^>]*)>(.*?)</h1>', 'Singleline')) {
+    $t = [System.Web.HttpUtility]::HtmlDecode(($m.Groups[2].Value -replace '<[^>]+>', '' -replace '\s+', ' ')).Trim()
+    if (-not $t) { continue }
+    if ($m.Groups[1].Value -match 'productTitle') { return $t }
+    if (-not $byStem -and $stem -and $t.StartsWith($stem)) { $byStem = $t }
   }
-  if ($Html -match '<meta\s+property="og:title"\s+content="([^"]*)"') { return [System.Web.HttpUtility]::HtmlDecode($Matches[1]).Trim() }
-  return ''
+  if ($byStem) { return $byStem }
+  return $og
 }
 
 # URL の本文を UTF-8 で取る。取れなければ $null。$Session を渡すと cookie を付ける

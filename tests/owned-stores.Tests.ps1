@@ -17,6 +17,8 @@ Describe 'ConvertTo-StoreCode' {
   It 'DLsite の URL は RJ番号' { ConvertTo-StoreCode 'https://www.dlsite.com/maniax/work/=/product_id/RJ01234567.html' | Should Be 'RJ01234567' }
   It 'RJ番号を含むものは RJ番号を先に見る' { ConvertTo-StoreCode 'https://store.steampowered.com/app/1234560/?x=RJ01234567' | Should Be 'RJ01234567' }
   It 'どれでもなければ空' { ConvertTo-StoreCode 'https://example.com/app/123' | Should Be '' }
+  It '見直し：入っている「FANZA 番号」をそのまま OK しても読める' { ConvertTo-StoreCode 'FANZA d_123456' | Should Be 'FANZA d_123456'; ConvertTo-StoreCode 'fanza Kakuu_0001' | Should Be 'FANZA kakuu_0001' }
+  It '見直し：Steam の年齢確認の URL も読む' { ConvertTo-StoreCode 'https://store.steampowered.com/agecheck/app/1234560/' | Should Be 'Steam 1234560' }
 }
 
 Describe '自分で入れた名前の Code' {
@@ -50,6 +52,10 @@ Describe '作品名の読み取り（保存した見本で）' {
   It 'Steam の success が偽なら空' { ConvertFrom-SteamAppDetails '{"1234560":{"success":false}}' '1234560' | Should Be '' }
   It 'Steam の返事が壊れていれば空' { ConvertFrom-SteamAppDetails 'not json' '1234560' | Should Be '' }
   It 'FANZA は見出し（h1）を使う（og:title は長いと途中で切れるため。中のタグと &amp; を戻す）' { ConvertFrom-FanzaPage $fanza | Should Be '架空の同人ゲーム & 体験 〜長い副題の続き〜' }
+  It '見直し：作品名の見出しでない h1（年齢認証など）は使わず og:title' { ConvertFrom-FanzaPage '<h1 class="logo">年齢認証</h1><meta property="og:title" content="架空の作品">' | Should Be '架空の作品' }
+  It '見直し：productTitle の h1 は og:title が切れていても使う' { ConvertFrom-FanzaPage '<h1>サイトの名前</h1><h1 class="productTitle__txt">架空の作品 〜続き〜</h1><meta property="og:title" content="架空の...">' | Should Be '架空の作品 〜続き〜' }
+  It '見直し：og:title と同じ書き出しの h1 は使う（切れた og:title の続きを取る）' { ConvertFrom-FanzaPage '<h1>架空の作品 〜長い副題の続き〜</h1><meta property="og:title" content="架空の作品 〜長い...">' | Should Be '架空の作品 〜長い副題の続き〜' }
+  It '見直し：作品名らしい h1 も og:title もなければ空' { ConvertFrom-FanzaPage '<h1>年齢認証</h1>' | Should Be '' }
   It 'FANZA の見出しがなければ og:title' { ConvertFrom-FanzaPage '<meta property="og:title" content="架空 &amp; 作品">' | Should Be '架空 & 作品' }
   It 'FANZA の og:title がなければ空（年齢確認のページなど）' { ConvertFrom-FanzaPage '<html><head><title>年齢認証</title></head></html>' | Should Be '' }
 }
