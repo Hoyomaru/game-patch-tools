@@ -46,3 +46,38 @@ Describe 'Get-UnknownWorks' {
     @(Get-UnknownWorks $c2 @() @($g2, (Join-Path $g2 'おや\こ')) | ForEach-Object Path) -contains (Join-Path $g2 'おや') | Should Be $false
   }
 }
+
+Describe 'Find-InsideCodes' {
+  $g = Join-Path $TestDrive 'inside'
+  New-TestFile (Join-Path $g 'a\RJ00000101_manual.pdf')
+  New-TestFile (Join-Path $g 'b\readme.txt') 'https://www.dlsite.com/maniax/work/=/product_id/RJ00000102.html'
+  New-TestFile (Join-Path $g 'c\RJ00000103.txt') 'rj00000104 も見てね'
+  New-TestFile (Join-Path $g 'd\big.txt') ('x' * 300KB + ' RJ00000105')
+  It 'ファイル名から見つける' { @(Find-InsideCodes (Join-Path $g 'a')) -join ',' | Should Be 'RJ00000101' }
+  It 'テキストの中から見つける' { @(Find-InsideCodes (Join-Path $g 'b')) -join ',' | Should Be 'RJ00000102' }
+  It '2つあれば両方返す（大文字にそろえる）' { @(Find-InsideCodes (Join-Path $g 'c')) -join ',' | Should Be 'RJ00000103,RJ00000104' }
+  It '大きいファイルは読まない' { @(Find-InsideCodes (Join-Path $g 'd')).Count | Should Be 0 }
+  It 'アーカイブなら空' { New-TestFile (Join-Path $g 'x.zip'); @(Find-InsideCodes (Join-Path $g 'x.zip')).Count | Should Be 0 }
+}
+
+Describe 'Get-InnerGameTitle' {
+  $g = Join-Path $TestDrive 'title'
+  New-TestFile (Join-Path $g 'mv\www\data\System.json') '{"gameTitle":"架空のRPG","other":1}'
+  New-TestFile (Join-Path $g 'vx\Game.ini') "[Game]`r`nLibrary=RGSS3.dll`r`nTitle=架空のぼうけん`r`n" ([Text.Encoding]::GetEncoding(932))
+  New-TestFile (Join-Path $g 'nw\package.json') '{"name":"kakuu","window":{"title":"架空のノベル"}}'
+  New-TestFile (Join-Path $g 'nw2\package.json') '{"name":"kakuu-game"}'
+  New-TestFile (Join-Path $g 'un\Kakuu_Data\app.info') "Kakuu Circle`nKakuu Adventure"
+  New-TestDirs $g @('none')
+  It 'ツクールMV/MZ の gameTitle' { Get-InnerGameTitle (Join-Path $g 'mv') | Should Be '架空のRPG' }
+  It 'Game.ini の Title（Shift_JIS）' { Get-InnerGameTitle (Join-Path $g 'vx') | Should Be '架空のぼうけん' }
+  It 'package.json の window.title' { Get-InnerGameTitle (Join-Path $g 'nw') | Should Be '架空のノベル' }
+  It 'package.json の name' { Get-InnerGameTitle (Join-Path $g 'nw2') | Should Be 'kakuu-game' }
+  It 'Unity の app.info の2行目' { Get-InnerGameTitle (Join-Path $g 'un') | Should Be 'Kakuu Adventure' }
+  It 'なければ空' { Get-InnerGameTitle (Join-Path $g 'none') | Should Be '' }
+}
+
+Describe 'New-SearchTerm' {
+  It '版と括弧を除く' { New-SearchTerm 'かくうRPG_v1.02 (体験版)' $false | Should Be 'かくうRPG' }
+  It 'アーカイブは拡張子を除く' { New-SearchTerm 'かくう ver2.zip' $true | Should Be 'かくう' }
+  It '_ や - は空白にして1つにまとめる' { New-SearchTerm 'kakuu__game--x' $false | Should Be 'kakuu game x' }
+}

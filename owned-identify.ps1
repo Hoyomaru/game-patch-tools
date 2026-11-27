@@ -65,3 +65,66 @@ function Get-UnknownWorks($Candidates, [string[]]$ExcludePaths, [string[]]$GameD
     [pscustomobject]@{ Path = $w; OldName = $name; IsArchive = [bool]$works[$w] }
   }
 }
+
+# ---------- 2. 中の手がかりと検索する言葉 ----------
+
+$script:InsideTextExt = '.txt', '.url', '.html', '.htm', '.md', '.ini', '.json', '.nfo'
+
+# フォルダの中のファイル名と、小さなテキストファイル（200KB 未満、50 個まで）の中身から RJ番号を探す。
+# 戻り値: 見つけた順の RJ番号（大文字・重複なし）。アーカイブなら空
+function Find-InsideCodes([string]$Path) {
+  $found = New-Object System.Collections.Generic.List[string]
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $found.ToArray() }
+  $add = { param([string]$s) foreach ($m in [regex]::Matches($s, $script:CodeRe, 'IgnoreCase')) { $c = $m.Groups[1].Value.ToUpperInvariant(); if (-not $found.Contains($c)) { $found.Add($c) } } }
+  $files = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue)
+  foreach ($f in $files) { & $add $f.Name }
+  $texts = @($files | Where-Object { $_.Length -lt 200KB -and $script:InsideTextExt -contains $_.Extension.ToLowerInvariant() } | Select-Object -First 50)
+  foreach ($f in $texts) {
+    try { & $add ([IO.File]::ReadAllText($f.FullName)) } catch { }
+  }
+  return $found.ToArray()
+}
+
+function Read-JsonFile([string]$Path) {
+  try { return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
+}
+
+# ゲームの中に書いてある作品名。なければ ''
+#   ツクールMV/MZ の System.json の gameTitle → ツクールVX/XP の Game.ini の Title（Shift_JIS）→ package.json の window.title か name → Unity の *_Data\app.info の2行目
+function Get-InnerGameTitle([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return '' }
+  foreach ($rel in 'data\System.json', 'www\data\System.json') {
+    $p = Join-Path $Path $rel
+    if (Test-Path -LiteralPath $p -PathType Leaf) { $j = Read-JsonFile $p; if ($j -and $j.gameTitle) { return ([string]$j.gameTitle).Trim() } }
+  }
+  $p = Join-Path $Path 'Game.ini'
+  if (Test-Path -LiteralPath $p -PathType Leaf) {
+    try {
+      foreach ($l in [IO.File]::ReadAllLines($p, [Text.Encoding]::GetEncoding(932))) { if ($l -match '^\s*Title\s*=\s*(.+?)\s*$') { return $Matches[1] } }
+    } catch { }
+  }
+  $p = Join-Path $Path 'package.json'
+  if (Test-Path -LiteralPath $p -PathType Leaf) {
+    $j = Read-JsonFile $p
+    if ($j -and $j.window -and $j.window.title) { return ([string]$j.window.title).Trim() }
+    if ($j -and $j.name) { return ([string]$j.name).Trim() }
+  }
+  foreach ($d in @(Get-ChildItem -LiteralPath $Path -Filter '*_Data' -Directory -Force -ErrorAction SilentlyContinue)) {
+    $p = Join-Path $d.FullName 'app.info'
+    if (Test-Path -LiteralPath $p -PathType Leaf) {
+      try { $l = @([IO.File]::ReadAllLines($p, [Text.Encoding]::UTF8)); if ($l.Count -ge 2 -and $l[1].Trim()) { return $l[1].Trim() } } catch { }
+    }
+  }
+  return ''
+}
+
+# フォルダ名（アーカイブなら拡張子を除く）から検索する言葉を作る：版・括弧の中・「体験版」などを除き、記号は空白1つにまとめる
+function New-SearchTerm([string]$Name, [bool]$IsArchive) {
+  $s = if ($IsArchive) { [IO.Path]::GetFileNameWithoutExtension($Name) } else { $Name }
+  $s = $s.Normalize([Text.NormalizationForm]::FormKC)
+  $s = $s -replace '\[[^\]]*\]|【[^】]*】|\([^)]*\)|〔[^〕]*〕', ' '
+  $s = $s -replace '(?i)(?:(?<![a-z0-9])ver(?:sion)?\.?\s*|(?<![a-z0-9])v)\d+(?:[._\-]\d+)*[a-z]?(?![\w.])', ' '
+  $s = $s -replace '(?i)(体験版|trial|demo|完全版|製品版|dl版|パッケージ版|日本語版|english|translation|patch)', ' '
+  $s = $s -replace '[^\p{L}\p{N}]+', ' '
+  return $s.Trim()
+}
