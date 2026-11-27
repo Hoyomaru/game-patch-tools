@@ -81,3 +81,32 @@ Describe 'New-SearchTerm' {
   It 'アーカイブは拡張子を除く' { New-SearchTerm 'かくう ver2.zip' $true | Should Be 'かくう' }
   It '_ や - は空白にして1つにまとめる' { New-SearchTerm 'kakuu__game--x' $false | Should Be 'kakuu game x' }
 }
+
+Describe 'ConvertFrom-DLsiteSearch' {
+  $json = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\dlsite-search-sample.json'))
+  $h = @(ConvertFrom-DLsiteSearch $json)
+  It '上から5件、重複なし' { $h.Count | Should Be 5; $h[0].Code | Should Be 'RJ00000201'; $h[2].Code | Should Be 'RJ00000203' }
+  It '文字参照を戻す' { $h[0].Title | Should Be '架空の作品 & その2'; $h[1].Title | Should Be '架空の作品 "外伝"' }
+  It '形が違えば空' { @(ConvertFrom-DLsiteSearch '{"search_result":""}').Count | Should Be 0; @(ConvertFrom-DLsiteSearch 'not json').Count | Should Be 0 }
+}
+
+Describe 'Select-AutoCode' {
+  $hit = { param($c, $t) [pscustomobject]@{ Code = $c; Title = $t; Floor = 'maniax' } }
+  $hits = @((& $hit 'RJ00000301' '架空のRPG'), (& $hit 'RJ00000302' '架空のRPG 2'))
+  It '中の作品名で、完全一致が1つならその番号' { Select-AutoCode $hits '架空の RPG' $true | Should Be 'RJ00000301' }
+  It 'フォルダ名から作った言葉なら一致しても空' { Select-AutoCode $hits '架空のRPG' $false | Should Be '' }
+  It '全年齢と R18 で2つ一致したら空' { Select-AutoCode @($hits + (& $hit 'RJ00000303' '架空のRPG')) '架空のRPG' $true | Should Be '' }
+  It '一致がなければ空' { Select-AutoCode $hits 'べつ' $true | Should Be '' }
+}
+
+Describe 'SearchCache' {
+  It '保存して読み戻せる' {
+    $p = Join-Path $TestDrive 'cache.json'
+    $c = @{ '架空のRPG' = @{ Ok = $true; At = '2026-11-27'; Hits = @(@{ Code = 'RJ00000301'; Title = '架空のRPG'; Floor = 'maniax' }) } }
+    Save-SearchCache $p $c
+    $r = Read-SearchCache $p
+    $r['架空のRPG'].Ok | Should Be $true
+    @($r['架空のRPG'].Hits)[0].Code | Should Be 'RJ00000301'
+  }
+  It 'なければ空' { (Read-SearchCache (Join-Path $TestDrive 'none.json')).Count | Should Be 0 }
+}

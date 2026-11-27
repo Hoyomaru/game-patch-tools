@@ -128,3 +128,73 @@ function New-SearchTerm([string]$Name, [bool]$IsArchive) {
   $s = $s -replace '[^\p{L}\p{N}]+', ' '
   return $s.Trim()
 }
+
+# ---------- 3. DLsite の検索と保存 ----------
+
+$script:SearchFloors = 'maniax', 'home'   # R18 と全年齢の売り場
+
+# DLsite の検索（/fsr/ajax/）の返事（JSON の中に HTML）から、作品を上から5件（同じ番号は1つ）読む。形が違えば空
+# 戻り値: Code / Title の一覧
+function ConvertFrom-DLsiteSearch([string]$Json) {
+  $out = New-Object System.Collections.Generic.List[object]
+  try { $html = [string]($Json | ConvertFrom-Json).search_result } catch { return $out.ToArray() }
+  if (-not $html) { return $out.ToArray() }
+  $re = '<dd class="work_name">.*?<a [^>]*href="[^"]*/product_id/((?:RJ|VJ|BJ|RE)\d{6,8})\.html"[^>]*title="([^"]*)"'
+  foreach ($m in [regex]::Matches($html, $re, 'Singleline')) {
+    $code = $m.Groups[1].Value.ToUpperInvariant()
+    if (@($out | Where-Object Code -eq $code).Count) { continue }
+    $out.Add([pscustomobject]@{ Code = $code; Title = [System.Web.HttpUtility]::HtmlDecode($m.Groups[2].Value) })
+    if ($out.Count -ge 5) { break }
+  }
+  return $out.ToArray()
+}
+
+# 検索する言葉で DLsite の R18 と全年齢の売り場を検索する（送るのは言葉だけ）。問い合わせの間は 800 ミリ秒あける。
+# 戻り値: Ok（どちらも返事が取れたか）/ Hits（Code / Title / Floor の一覧。取れた分）
+function Search-DLsite([string]$Term) {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  $ok = $true
+  $hits = New-Object System.Collections.Generic.List[object]
+  $first = $true
+  foreach ($floor in $script:SearchFloors) {
+    if (-not $first) { Start-Sleep -Milliseconds 800 }
+    $first = $false
+    $url = "https://www.dlsite.com/$floor/fsr/ajax/=/language/jp/keyword/$([uri]::EscapeDataString($Term))/"
+    try {
+      $res = Invoke-WebRequest -Uri $url -UseBasicParsing -UserAgent 'Mozilla/5.0' -TimeoutSec 30
+      $ms = New-Object IO.MemoryStream
+      $res.RawContentStream.Position = 0; $res.RawContentStream.CopyTo($ms)
+      foreach ($h in @(ConvertFrom-DLsiteSearch ([Text.Encoding]::UTF8.GetString($ms.ToArray())))) {
+        $hits.Add([pscustomobject]@{ Code = $h.Code; Title = $h.Title; Floor = $floor })
+      }
+    } catch { $ok = $false }
+  }
+  return [pscustomobject]@{ Ok = $ok; Hits = $hits.ToArray() }
+}
+
+# 自動でチェックを付けてよい番号：ゲームの中の作品名で検索したときだけ、正規化した作品名が検索した言葉と同じものが全体で1つならその番号。ほかは ''
+function Select-AutoCode($Hits, [string]$Term, [bool]$FromInnerTitle) {
+  if (-not $FromInnerTitle) { return '' }
+  $t = Normalize-Title $Term
+  if (-not $t) { return '' }
+  $same = @(@($Hits) | Where-Object { $_ -and (Normalize-Title $_.Title) -eq $t } | ForEach-Object Code | Select-Object -Unique)
+  if ($same.Count -eq 1) { return [string]$same[0] }
+  return ''
+}
+
+# 検索の結果の保存（dlsite-search-cache.json）。形: { "検索語": { "Ok": true, "At": "yyyy-MM-dd", "Hits": [ { "Code", "Title", "Floor" } ] } }
+function Read-SearchCache([string]$Path) {
+  $c = @{}
+  if (-not (Test-Path -LiteralPath $Path)) { return $c }
+  try {
+    $o = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($p in $o.PSObject.Properties) { $c[$p.Name] = [pscustomobject]@{ Ok = [bool]$p.Value.Ok; At = [string]$p.Value.At; Hits = @($p.Value.Hits | Where-Object { $_ }) } }
+  } catch { }
+  return $c
+}
+
+function Save-SearchCache([string]$Path, [hashtable]$Cache) {
+  $o = [ordered]@{}
+  foreach ($k in @($Cache.Keys | Sort-Object)) { $v = $Cache[$k]; $o[$k] = [ordered]@{ Ok = [bool]$v.Ok; At = [string]$v.At; Hits = @($v.Hits) } }
+  [IO.File]::WriteAllText($Path, ($o | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding $false))
+}
