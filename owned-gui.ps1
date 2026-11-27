@@ -1,5 +1,5 @@
 ﻿# owned-gui.ps1 — 所持チェック（GUI 版）。「所持チェック.bat」をダブルクリックで起動します。
-# すべてこのPCの中だけで処理します。ネットにアクセスするのは「URL をまとめて追加」と「フォルダ名をそろえる」で作品名を DLsite から取るときだけです（送るのは RJ 番号だけ）。
+# すべてこのPCの中だけで処理します。ネットにアクセスするのは、DLsite から作品名を取るとき（送るのは RJ 番号だけ）と、「フォルダ名をそろえる」でブックマークにない作品を検索するとき（送るのは検索する言葉だけ）です。
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'owned-core.ps1')
 . (Join-Path $PSScriptRoot 'owned-identify.ps1')
