@@ -576,11 +576,13 @@ function Invoke-RenameSearch([string[]]$Terms, [hashtable]$Cache) {
   $script:RenameStop = $false
   $pbtn = New-Button '止める' { $script:RenameStop = $true }
   $pfl.Controls.Add($plbl); $pfl.Controls.Add($pbtn); $pf.Controls.Add($pfl)
+  # Alt+F4 で閉じられたら止める（閉じたまま検索が続き、本体の画面が操作できなくなるのを防ぐ）
+  $pf.Add_FormClosing({ $script:RenameStop = $true })
   # Show() では CenterParent が効かないので、表示してから親の真ん中に動かす
   $pf.StartPosition = 'Manual'; $pf.Show($form)
   $pf.Location = New-Object System.Drawing.Point(($form.Left + [int](($form.Width - $pf.Width) / 2)), ($form.Top + [int](($form.Height - $pf.Height) / 2)))
   $form.Enabled = $false
-  $n = 0
+  $n = 0; $failRun = 0; $gaveUp = $false
   try {
     foreach ($term in $Terms) {
       if ($script:RenameStop) { break }
@@ -589,14 +591,18 @@ function Invoke-RenameSearch([string[]]$Terms, [hashtable]$Cache) {
       $r = Search-DLsite $term
       $Cache[$term] = [pscustomobject]@{ Ok = $r.Ok; At = (Get-Date -Format 'yyyy-MM-dd'); Hits = @($r.Hits) }
       $n++
-      if ($n % 10 -eq 0) { Save-SearchCache $SearchCachePath $Cache }
+      # つながらないことが3回続いたら止める（1件で最大 20 秒待つため）
+      if ($r.Ok) { $failRun = 0 } else { $failRun++; if ($failRun -ge 3) { $gaveUp = $true; break } }
+      if ($n % 10 -eq 0) { try { Save-SearchCache $SearchCachePath $Cache } catch { } }
       # 次の問い合わせまで 800 ミリ秒あける（その間も「止める」を受け付ける）
       for ($i = 0; $i -lt 8 -and -not $script:RenameStop; $i++) { Start-Sleep -Milliseconds 100; [System.Windows.Forms.Application]::DoEvents() }
     }
   } finally {
-    Save-SearchCache $SearchCachePath $Cache
+    # 先に本体の画面を戻す（保存に失敗しても操作できなくならないように）
     $form.Enabled = $true; $pf.Close()
+    try { Save-SearchCache $SearchCachePath $Cache } catch { Show-Error "検索の結果を保存できませんでした（次回また検索します）:`n$($_.Exception.Message)" }
   }
+  if ($gaveUp) { Show-Info "DLsite につながらないことが続いたので、検索を止めました（$n 件まで調べました）。`nネットにつながっているか確かめてから、もう一度「フォルダ名をそろえる…」を押すと、残りを検索します。" }
   return $n
 }
 
@@ -617,7 +623,10 @@ function Show-RenameDialog {
     # ブックマークで当たった候補と「たぶん」の候補は、ブックマークにない作品として扱わない
     $excl = @(@($script:Results | Where-Object { $_.Status -in 'owned', 'maybe' -and $_.MatchPath } | ForEach-Object MatchPath) + @($known | ForEach-Object Path))
     $lblStatus.Text = 'ブックマークにない作品を調べています…'; $form.Refresh()
-    $unknown = @(Get-UnknownTargets $cands $excl $dirs)
+    $unknown = @(Get-UnknownTargets $cands $excl $dirs {
+      param($i, $n)
+      if ($i % 5 -eq 1 -or $i -eq $n) { $lblStatus.Text = "ブックマークにない作品を調べています…（$i / $n）"; [System.Windows.Forms.Application]::DoEvents() }
+    })
   } finally { $form.Cursor = 'Default' }
   $targets = @($known + $unknown)
   if ($targets.Count -eq 0) {

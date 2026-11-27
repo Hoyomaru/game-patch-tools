@@ -256,3 +256,15 @@ Describe 'Update-TargetStates' {
     $ts[0].State | Should Be 'ok'; $ts[1].State | Should Be 'ok'; $ts[1].NewName | Should Be 'RJ00000603 架空B'
   }
 }
+
+Describe '最終レビュー：片方の売り場が失敗したとき' {
+  It 'Ok が偽なら一致があっても自動チェックにしない' {
+    $t = New-RenameTarget '' 'E:\G\x' 'x' $false '' 'nocode' '' $false
+    $t.Term = '架空のRPG'; $t.FromInnerTitle = $true
+    $cache = @{ '架空のRPG' = [pscustomobject]@{ Ok = $false; At = '2026-11-27'; Hits = @([pscustomobject]@{ Code = 'RJ00000901'; Title = '架空のRPG'; Floor = 'maniax' }) } }
+    Set-SearchResults @($t) $cache
+    $t.State | Should Be 'nocode'
+    $t.Auto | Should Be $false
+    @($t.Choices)[0].Code | Should Be 'RJ00000901'
+  }
+}

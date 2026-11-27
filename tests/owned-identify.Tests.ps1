@@ -110,3 +110,45 @@ Describe 'SearchCache' {
   }
   It 'なければ空' { (Read-SearchCache (Join-Path $TestDrive 'none.json')).Count | Should Be 0 }
 }
+
+Describe '最終レビューで見つかった点' {
+  It 'サークルの中に作品1つとアーカイブがあれば、外側をまとめない' {
+    $g = Join-Path $TestDrive 'fx1'
+    New-TestFile (Join-Path $g 'circleA\gameA\Game.exe'); New-TestFile (Join-Path $g 'circleA\other.zip')
+    $p = @(Get-UnknownWorks (Get-GameCandidates @($g) 2) @() @($g) | ForEach-Object Path)
+    $p -contains (Join-Path $g 'circleA') | Should Be $false
+    $p -contains (Join-Path $g 'circleA\gameA') | Should Be $true
+  }
+  It 'サークルの中に作品と「名前\Game」形の作品があれば、外側をまとめず入れ子にもしない' {
+    $g = Join-Path $TestDrive 'fx2'
+    New-TestFile (Join-Path $g 'circleB\b1\Game.exe'); New-TestFile (Join-Path $g 'circleB\b2\Game\Game.exe')
+    $p = @(Get-UnknownWorks (Get-GameCandidates @($g) 2) @() @($g) | ForEach-Object Path)
+    $p -contains (Join-Path $g 'circleB') | Should Be $false
+    $p -contains (Join-Path $g 'circleB\b1') | Should Be $true
+    $p -contains (Join-Path $g 'circleB\b2') | Should Be $true
+  }
+  It '500 件でも数秒で見分けられる' {
+    $g = Join-Path $TestDrive 'fx3'
+    foreach ($c in 1..100) { foreach ($w in 1..4) { New-TestFile (Join-Path $g "c$c\w$w\Game.exe") } }
+    $cands = Get-GameCandidates @($g) 2
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $n = @(Get-UnknownWorks $cands @() @($g)).Count
+    $sw.Stop()
+    $n | Should Be 400
+    $sw.Elapsed.TotalSeconds | Should BeLessThan 4
+  }
+  It '検索結果の読み取りは、作品名のない作品をまたいで次の作品の作品名を拾わない' {
+    $json = '{"search_result":"<dd class=\"work_name\"><a href=\"https://www.dlsite.com/maniax/work/=/product_id/RJ00000701.html\">x</a></dd><dd class=\"work_name\"><a href=\"https://www.dlsite.com/maniax/work/=/product_id/RJ00000702.html\" title=\"架空B\">x</a></dd>"}'
+    $h = @(ConvertFrom-DLsiteSearch $json)
+    @($h | Where-Object { $_.Code -eq 'RJ00000701' -and $_.Title -eq '架空B' }).Count | Should Be 0
+    @($h | Where-Object { $_.Code -eq 'RJ00000702' -and $_.Title -eq '架空B' }).Count | Should Be 1
+  }
+  It 'Find-InsideCodes はファイルが多くても上限までしか見ない' {
+    $g = Join-Path $TestDrive 'fx4'
+    New-TestDirs $g @('many')
+    foreach ($i in 1..30) { New-TestFile (Join-Path $g "many\f$i.dat") }
+    New-TestFile (Join-Path $g 'many\zz\RJ00000801.dat')
+    $script:InsideMaxFiles = 10
+    try { @(Find-InsideCodes (Join-Path $g 'many')).Count | Should Be 0 } finally { $script:InsideMaxFiles = 5000 }
+  }
+}

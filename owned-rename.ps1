@@ -105,8 +105,12 @@ function New-RenameTarget([string]$Code, [string]$Path, [string]$OldName, [bool]
 # ブックマークに当たらない作品（Get-UnknownWorks）を対象の行にする。
 #   中に書いてある RJ番号が1つ → Code を入れて State = 'pending'、Clue = 'inside'、Auto
 #   それ以外 → State = 'nocode'。中で2つ以上見つかった番号は Choices に。Term はゲームの中の作品名、なければフォルダ名から作る
-function Get-UnknownTargets($Candidates, [string[]]$ExcludePaths, [string[]]$GameDirs) {
-  foreach ($w in @(Get-UnknownWorks $Candidates $ExcludePaths $GameDirs)) {
+function Get-UnknownTargets($Candidates, [string[]]$ExcludePaths, [string[]]$GameDirs, [scriptblock]$OnProgress = $null) {
+  $ws = @(Get-UnknownWorks $Candidates $ExcludePaths $GameDirs)
+  $i = 0
+  foreach ($w in $ws) {
+    $i++
+    if ($OnProgress) { & $OnProgress $i $ws.Count }
     $codes = @(Find-InsideCodes $w.Path)
     if ($codes.Count -eq 1) {
       New-RenameTarget $codes[0] $w.Path $w.OldName $w.IsArchive '' 'pending' 'inside' $true
@@ -128,7 +132,8 @@ function Set-SearchResults($Targets, [hashtable]$Cache) {
     $hits = @($Cache[$t.Term].Hits | Where-Object { $_ })
     $have = @($t.Choices | ForEach-Object Code)
     $t.Choices = @(@($t.Choices) + @($hits | Where-Object { $have -notcontains $_.Code } | ForEach-Object { [pscustomobject]@{ Code = $_.Code; Title = $_.Title } }))
-    $auto = Select-AutoCode $hits $t.Term $t.FromInnerTitle
+    # 片方の売り場の検索が失敗していたら「両方合わせて1つだけ」を確かめられないので、候補だけにする
+    $auto = if ($Cache[$t.Term].Ok) { Select-AutoCode $hits $t.Term $t.FromInnerTitle } else { '' }
     if ($auto) { $t.Code = $auto; $t.Clue = 'search-exact'; $t.Auto = $true; $t.State = 'pending' }
     elseif ($hits.Count) { $t.Clue = 'search' }
   }

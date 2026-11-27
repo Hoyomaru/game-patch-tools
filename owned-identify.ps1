@@ -5,63 +5,88 @@
 
 # 直下にゲームの印があるか：.exe ファイル、*_Data フォルダ、www フォルダ、data\System.json、Game.ini、package.json
 function Test-GameFolder([string]$Path) {
-  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+  if (-not [IO.Directory]::Exists($Path)) { return $false }
   foreach ($rel in 'data\System.json', 'Game.ini', 'package.json') {
-    if (Test-Path -LiteralPath (Join-Path $Path $rel) -PathType Leaf) { return $true }
+    if ([IO.File]::Exists((Join-Path $Path $rel))) { return $true }
   }
-  if (Test-Path -LiteralPath (Join-Path $Path 'www') -PathType Container) { return $true }
-  if (@(Get-ChildItem -LiteralPath $Path -Filter '*.exe' -File -Force -ErrorAction SilentlyContinue).Count) { return $true }
-  if (@(Get-ChildItem -LiteralPath $Path -Filter '*_Data' -Directory -Force -ErrorAction SilentlyContinue).Count) { return $true }
+  if ([IO.Directory]::Exists((Join-Path $Path 'www'))) { return $true }
+  try {
+    foreach ($f in [IO.Directory]::EnumerateFiles($Path, '*.exe')) { return $true }
+    foreach ($d in [IO.Directory]::EnumerateDirectories($Path, '*_Data')) { return $true }
+  } catch { }
   return $false
 }
 
+# パスの親を順にたどる（自分は含まない）
+function Get-PathAncestors([string]$Path) {
+  $p = [IO.Path]::GetDirectoryName($Path)
+  while ($p) { $p.TrimEnd('\'); $p = [IO.Path]::GetDirectoryName($p) }
+}
+
 # 名前に RJ番号のない手元の作品（ブックマークに当たらないもの）を見分ける。
-#   ・アーカイブは作品（ゲームのフォルダの中にあるものは除く）
-#   ・印のあるフォルダは作品。その下の候補は除く（ゲームの中のフォルダ）
-#   ・印のあるフォルダのすぐ外側が印のないフォルダで、その中の印のあるフォルダがそれ1つだけなら、外側を作品にする（「作品名\Game\Game.exe」など）
-#   ・$ExcludePaths（ブックマークで当たった候補・「たぶん」の候補）、② のゲームフォルダとその親は除く
+#   作品のもと（ユニット）：
+#     ・印のあるフォルダ（外側に印のあるフォルダがないもの。その下の候補はゲームの中のフォルダとして除く）
+#     ・アーカイブ（ゲームのフォルダの中にあるものは除く）
+#     ・印のない候補で、下に候補の印のあるフォルダがなく、直下の子にディスクで見て印のあるフォルダがちょうど1つのもの
+#       （「Game」「data」のような名前の子は Get-GameCandidates が候補から除くので、ディスクで確かめる。そのフォルダ自身を作品にする）
+#   印のあるフォルダのすぐ外側が印のない候補で、その下にあるユニットがそれ1つだけなら、外側を作品にする（「作品名\Game\Game.exe」「作品\作品」）。
+#   ほかにアーカイブや別の作品があるなら（サークルのフォルダ）、まとめない。最後に、作品の下にある作品は除く
+#   $ExcludePaths（ブックマークで当たった候補・「たぶん」の候補）とその親、② のゲームフォルダとその親は除く
 # 戻り値: Path / OldName / IsArchive の一覧
 function Get-UnknownWorks($Candidates, [string[]]$ExcludePaths, [string[]]$GameDirs) {
-  $cl = @($Candidates | ForEach-Object { $_ })
-  $isDir = @{}; $byPath = @{}
-  foreach ($c in $cl) {
+  $byPath = @{}; $isDir = @{}
+  foreach ($c in @($Candidates | ForEach-Object { $_ })) {
     $p = ([string]$c.Path).TrimEnd('\')
     $byPath[$p] = $c
-    $isDir[$p] = Test-Path -LiteralPath $p -PathType Container
+    $isDir[$p] = [IO.Directory]::Exists($p)
   }
   $marker = @{}
   foreach ($p in @($byPath.Keys)) { if ($isDir[$p] -and (Test-GameFolder $p)) { $marker[$p] = $true } }
-  $under = { param([string]$child, [string]$parent) $child.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase) }
-  $hasMarkerAncestor = { param([string]$p) foreach ($m in $marker.Keys) { if (& $under $p $m) { return $true } }; return $false }
-  $topMarkers = @($marker.Keys | Where-Object { -not (& $hasMarkerAncestor $_) })
+  $inMarker = { param([string]$p) foreach ($a in @(Get-PathAncestors $p)) { if ($marker.ContainsKey($a)) { return $true } }; return $false }
+  $topMarkers = @($marker.Keys | Where-Object { -not (& $inMarker $_) })
+  $archives = @($byPath.Keys | Where-Object { -not $isDir[$_] -and -not (& $inMarker $_) })
+  # 印のある候補を下に持つフォルダ
+  $hasMarkerBelow = @{}
+  foreach ($m in $topMarkers) { foreach ($a in @(Get-PathAncestors $m)) { $hasMarkerBelow[$a] = $true } }
+  $diskWorks = @()
+  foreach ($p in @($byPath.Keys)) {
+    if (-not $isDir[$p] -or $marker.ContainsKey($p) -or $hasMarkerBelow.ContainsKey($p) -or (& $inMarker $p)) { continue }
+    $kids = 0
+    try { foreach ($d in [IO.Directory]::EnumerateDirectories($p)) { if (Test-GameFolder $d) { $kids++; if ($kids -gt 1) { break } } } } catch { }
+    if ($kids -eq 1) { $diskWorks += $p }
+  }
+  # ディスクで見た作品のさらに下の候補は、その作品の中のもの
+  $diskSet = @{}; foreach ($d in $diskWorks) { $diskSet[$d] = $true }
+  $inDisk = { param([string]$p) foreach ($a in @(Get-PathAncestors $p)) { if ($diskSet.ContainsKey($a)) { return $true } }; return $false }
+  $diskWorks = @($diskWorks | Where-Object { -not (& $inDisk $_) })
+  $archives = @($archives | Where-Object { -not (& $inDisk $_) })
+  # フォルダごとに、その下にあるユニットの数
+  $units = @($topMarkers) + @($archives) + @($diskWorks)
+  $below = @{}
+  foreach ($u in $units) { foreach ($a in @(Get-PathAncestors $u)) { $below[$a] = 1 + [int]$below[$a] } }
   $works = [ordered]@{}
   foreach ($m in $topMarkers) {
     $w = $m
-    $parent = Split-Path -Parent $m
-    if ($byPath.ContainsKey($parent) -and -not $marker.ContainsKey($parent)) {
-      if (@($topMarkers | Where-Object { & $under $_ $parent }).Count -eq 1) { $w = $parent }
-    }
+    $parent = [IO.Path]::GetDirectoryName($m)
+    if ($parent -and $byPath.ContainsKey($parent) -and $isDir[$parent] -and [int]$below[$parent] -eq 1) { $w = $parent }
     $works[$w] = $false
   }
-  foreach ($p in @($byPath.Keys)) {
-    if (-not $isDir[$p] -and -not (& $hasMarkerAncestor $p)) { $works[$p] = $true }
+  foreach ($d in $diskWorks) { $works[$d] = $false }
+  foreach ($a in $archives) { $works[$a] = $true }
+  $workSet = @{}; foreach ($w in $works.Keys) { $workSet[$w] = $true }
+  $blocked = @{}
+  foreach ($r in @($GameDirs) + @($ExcludePaths)) {
+    if (-not $r) { continue }
+    $r = $r.TrimEnd('\'); $blocked[$r] = $true
+    foreach ($a in @(Get-PathAncestors $r)) { $blocked[$a] = $true }
   }
-  # 「Game」「data」のような名前の子は候補に入らない（Get-GameCandidates が除く）ので、印のない候補は直下の子もディスクで確かめる
-  foreach ($p in @($byPath.Keys)) {
-    if (-not $isDir[$p] -or $marker.ContainsKey($p) -or $works.Contains($p) -or (& $hasMarkerAncestor $p)) { continue }
-    if (@($topMarkers | Where-Object { & $under $_ $p }).Count) { continue }
-    $kids = @(Get-ChildItem -LiteralPath $p -Directory -Force -ErrorAction SilentlyContinue | Where-Object { Test-GameFolder $_.FullName })
-    if ($kids.Count -eq 1) { $works[$p] = $false }
-  }
-  $roots = @(@($GameDirs) | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') })
-  $excl = @{}; foreach ($e in @($ExcludePaths)) { if ($e) { $excl[$e.TrimEnd('\')] = $true } }
   foreach ($w in $works.Keys) {
     $name = Split-Path -Leaf $w
     if ($name -match $script:CodeRe) { continue }
-    if ($excl.ContainsKey($w)) { continue }
-    # 外側にまとめた作品は、中の印のあるフォルダが除くものなら除く
-    if (@($excl.Keys | Where-Object { & $under $_ $w }).Count) { continue }
-    if (@($roots | Where-Object { $_ -ieq $w -or (& $under $_ $w) }).Count) { continue }
+    if ($blocked.ContainsKey($w)) { continue }
+    $nested = $false
+    foreach ($a in @(Get-PathAncestors $w)) { if ($workSet.ContainsKey($a)) { $nested = $true; break } }
+    if ($nested) { continue }
     [pscustomobject]@{ Path = $w; OldName = $name; IsArchive = [bool]$works[$w] }
   }
 }
@@ -69,14 +94,26 @@ function Get-UnknownWorks($Candidates, [string[]]$ExcludePaths, [string[]]$GameD
 # ---------- 2. 中の手がかりと検索する言葉 ----------
 
 $script:InsideTextExt = '.txt', '.url', '.html', '.htm', '.md', '.ini', '.json', '.nfo'
+# 1つの作品で見るファイルの数の上限（ゲームは数千ファイルあることがあるため。浅いところから見る）
+$script:InsideMaxFiles = 5000
 
-# フォルダの中のファイル名と、小さなテキストファイル（200KB 未満、50 個まで）の中身から RJ番号を探す。
+# フォルダの中のファイル名（$script:InsideMaxFiles 個まで）と、小さなテキストファイル（200KB 未満、50 個まで）の中身から RJ番号を探す。
 # 戻り値: 見つけた順の RJ番号（大文字・重複なし）。アーカイブなら空
 function Find-InsideCodes([string]$Path) {
   $found = New-Object System.Collections.Generic.List[string]
-  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $found.ToArray() }
+  if (-not [IO.Directory]::Exists($Path)) { return $found.ToArray() }
   $add = { param([string]$s) foreach ($m in [regex]::Matches($s, $script:CodeRe, 'IgnoreCase')) { $c = $m.Groups[1].Value.ToUpperInvariant(); if (-not $found.Contains($c)) { $found.Add($c) } } }
-  $files = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue)
+  # 浅い階層から順に見る（readme などは浅いところにあることが多い）
+  $files = New-Object System.Collections.Generic.List[IO.FileInfo]
+  $queue = New-Object System.Collections.Generic.Queue[string]
+  $queue.Enqueue($Path)
+  while ($queue.Count -and $files.Count -lt $script:InsideMaxFiles) {
+    $d = New-Object IO.DirectoryInfo $queue.Dequeue()
+    try {
+      foreach ($f in $d.EnumerateFiles()) { if ($files.Count -ge $script:InsideMaxFiles) { break }; $files.Add($f) }
+      foreach ($s in $d.EnumerateDirectories()) { $queue.Enqueue($s.FullName) }
+    } catch { }
+  }
   foreach ($f in $files) { & $add $f.Name }
   $texts = @($files | Where-Object { $_.Length -lt 200KB -and $script:InsideTextExt -contains $_.Extension.ToLowerInvariant() } | Select-Object -First 50)
   foreach ($f in $texts) {
@@ -151,7 +188,7 @@ function ConvertFrom-DLsiteSearch([string]$Json) {
 
 # 検索する言葉で DLsite の R18 と全年齢の売り場を検索する（送るのは言葉だけ）。問い合わせの間は 800 ミリ秒あける。
 # 戻り値: Ok（どちらも返事が取れたか）/ Hits（Code / Title / Floor の一覧。取れた分）
-function Search-DLsite([string]$Term) {
+function Search-DLsite([string]$Term, [int]$TimeoutSec = 10) {
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
   $ok = $true
   $hits = New-Object System.Collections.Generic.List[object]
@@ -161,7 +198,7 @@ function Search-DLsite([string]$Term) {
     $first = $false
     $url = "https://www.dlsite.com/$floor/fsr/ajax/=/language/jp/keyword/$([uri]::EscapeDataString($Term))/"
     try {
-      $res = Invoke-WebRequest -Uri $url -UseBasicParsing -UserAgent 'Mozilla/5.0' -TimeoutSec 30
+      $res = Invoke-WebRequest -Uri $url -UseBasicParsing -UserAgent 'Mozilla/5.0' -TimeoutSec $TimeoutSec
       $ms = New-Object IO.MemoryStream
       $res.RawContentStream.Position = 0; $res.RawContentStream.CopyTo($ms)
       foreach ($h in @(ConvertFrom-DLsiteSearch ([Text.Encoding]::UTF8.GetString($ms.ToArray())))) {
