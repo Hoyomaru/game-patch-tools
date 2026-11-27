@@ -1,7 +1,8 @@
 ﻿# owned-gui.ps1 — 所持チェック（GUI 版）。「所持チェック.bat」をダブルクリックで起動します。
-# すべてこのPCの中だけで処理します。ネットにアクセスするのは「URL をまとめて追加」で作品名を DLsite から取るときだけです（送るのは RJ 番号だけ）。
+# すべてこのPCの中だけで処理します。ネットにアクセスするのは「URL をまとめて追加」と「フォルダ名をそろえる」で作品名を DLsite から取るときだけです（送るのは RJ 番号だけ）。
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'owned-core.ps1')
+. (Join-Path $PSScriptRoot 'owned-rename.ps1')
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type -Namespace Win32 -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
@@ -12,6 +13,7 @@ $SettingsPath = Join-Path $PSScriptRoot 'owned-gui-settings.json'
 $BackupDir    = Join-Path $PSScriptRoot 'bookmark-backups'
 $ReportPath   = Join-Path $PSScriptRoot 'owned-report.html'
 $LinksPath    = Join-Path $PSScriptRoot 'owned-links.json'
+$RenameLogDir = Join-Path $PSScriptRoot 'rename-logs'
 
 # 「たぶん持っている」を自分で確かめた対応（読めなければ空から始める）
 try { $script:Links = Read-OwnedLinks $LinksPath } catch { $script:Links = @{ Same = @{}; Diff = @{} } }
@@ -319,6 +321,8 @@ $bot.Controls.Add((New-Button 'バックアップのフォルダを開く' {
 }))
 $bot.Controls.Add((New-Button 'ASの結果を読み込む…' { Import-ASResults }))
 $bot.Controls.Add((New-Button 'ASで見つかった作品をフォルダにまとめる…' { Move-ASFound }))
+$bot.Controls.Add((New-Button 'フォルダ名をそろえる…' { Show-RenameDialog }))
+$bot.Controls.Add((New-Button 'フォルダ名を戻す…' { Undo-Rename }))
 $bot.Controls.Add((New-Label '※ 消す・まとめるときはブラウザを完全に終了しておいてください。毎回バックアップを取ります。'))
 
 # ---------- 処理 ----------
@@ -535,6 +539,141 @@ function Move-ASFound {
   $r = Move-BookmarksToSubfolder $target $folder $name.Trim() $codes $BackupDir
   Show-Info "$($r.Moved.Count) 作品を移しました。`n（バックアップ: $(Split-Path $r.Backup -Leaf)）" 'まとめた結果'
   Refresh-Folders
+}
+
+# ---------- フォルダ名をそろえる ----------
+
+$RenameStateText = @{ ok = '変えられる'; multi = '複数の作品に当たる'; notitle = '作品名が取れなかった'; exists = '同じ名前がもうある' }
+
+# 「持っている」作品のうち RJ番号の入っていないフォルダ・アーカイブを「RJ番号 正式な作品名 v版」にそろえる。
+# 一覧で確かめてから、チェックしたものだけ変える。変えた記録は rename-logs に残し、「フォルダ名を戻す…」で戻せる
+function Show-RenameDialog {
+  if (-not $script:Results) { Show-Info '先に「チェック開始」を押してください。'; return }
+  $sources = @($src.List.Items | ForEach-Object { "$_" })
+  $dirs = @($gd.List.Items | ForEach-Object { "$_" })
+  $form.Cursor = 'WaitCursor'
+  try {
+    $lblStatus.Text = '名前を変えるフォルダを集めています…'; $form.Refresh()
+    $cands = Get-Candidates -Reuse
+    $wish = @(Get-OwnedWishlist $sources (Get-SelectedFolder) $BackupDir)
+    $targets = @(Get-RenameTargets $wish $cands ([double]$numTh.Value) $script:Links $dirs)
+  } finally { $form.Cursor = 'Default' }
+  if ($targets.Count -eq 0) {
+    $lblStatus.Text = '名前を変えられるフォルダはありません。'
+    Show-Info "名前を変えられるフォルダはありません。`n（RJ番号が入っていない「持っている」作品だけが対象です。「たぶん持っている」は、右クリックで確かめると対象になります）"
+    return
+  }
+  $codes = @($targets | Where-Object State -eq 'pending' | ForEach-Object Code | Select-Object -Unique)
+  $failedFetch = 0
+  if ($codes.Count) {
+    if (-not (Ask-YesNo "名前を変えられそうなフォルダが $($codes.Count) 件あります。`n正式な作品名を取るため、RJ番号 $($codes.Count) 件を DLsite に送ります（送るのは RJ番号だけ）。`n`nよろしいですか？" 'フォルダ名をそろえる')) { return }
+    $form.Cursor = 'WaitCursor'
+    try {
+      $lblStatus.Text = 'DLsite から作品名を取っています…'; $form.Refresh()
+      $titles = Get-DLsiteTitles $codes
+      $failedFetch = $script:DLsiteFailedCount
+    } finally { $form.Cursor = 'Default' }
+    Set-RenameNames $targets $titles
+  }
+  $okN = @($targets | Where-Object State -eq 'ok').Count
+  $lblStatus.Text = "名前を変えられるフォルダ $okN 件 ／ 変えないもの $($targets.Count - $okN) 件"
+
+  $dlg = New-Object System.Windows.Forms.Form
+  $dlg.Text = 'フォルダ名をそろえる'
+  $dlg.Font = $Font; $dlg.StartPosition = 'CenterParent'
+  $dlg.Size = New-Object System.Drawing.Size((px 980), (px 560))
+  $dlg.MinimumSize = New-Object System.Drawing.Size((px 620), (px 360))
+  $lay = New-Object System.Windows.Forms.TableLayoutPanel
+  $lay.Dock = 'Fill'; $lay.ColumnCount = 1; $lay.Padding = New-Object System.Windows.Forms.Padding((px 10))
+  [void]$lay.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
+  foreach ($i in 1..3) { [void]$lay.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize'))) }
+  $lay.RowStyles[1] = New-Object System.Windows.Forms.RowStyle('Percent', 100)
+  $dlg.Controls.Add($lay)
+
+  $note = "チェックしたフォルダの名前を「RJ番号 正式な作品名 v版」に変えます（版は今の名前から読めたときだけ）。`n" +
+          "「決め手」が「作品名が一致」のものは、同じ作品か気になるならチェックを外してください。変えた記録を残すので、「フォルダ名を戻す…」で戻せます。" +
+          $(if ($failedFetch) { "`n※ $failedFetch 件は DLsite から作品名を取れませんでした（ネットにつながっているか確かめてください）。" } else { '' })
+  $lay.Controls.Add((New-Label $note), 0, 0)
+
+  $rg = New-Object System.Windows.Forms.DataGridView
+  $rg.Dock = 'Fill'; $rg.AllowUserToAddRows = $false; $rg.AllowUserToDeleteRows = $false
+  $rg.RowHeadersVisible = $false; $rg.SelectionMode = 'FullRowSelect'; $rg.MultiSelect = $false
+  $rg.AutoSizeRowsMode = 'AllCells'; $rg.BackgroundColor = [System.Drawing.SystemColors]::Window
+  $rg.ColumnHeadersHeightSizeMode = 'AutoSize'; $rg.DefaultCellStyle.WrapMode = 'True'
+  $cc = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+  $cc.HeaderText = '変える'; $cc.Name = 'Do'; $cc.Width = (px 50)
+  [void]$rg.Columns.Add($cc)
+  foreach ($c in @(
+    @{ N = 'Old';   H = '今の名前';     W = 300 },
+    @{ N = 'New';   H = '新しい名前';   W = 320 },
+    @{ N = 'How';   H = '決め手';       W = 110 },
+    @{ N = 'State'; H = '状態';         W = 140 }
+  )) {
+    $col = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $col.Name = $c.N; $col.HeaderText = $c.H; $col.Width = (px $c.W); $col.ReadOnly = $true
+    [void]$rg.Columns.Add($col)
+  }
+  $rg.Columns['Old'].AutoSizeMode = 'Fill'; $rg.Columns['New'].AutoSizeMode = 'Fill'
+  foreach ($t in @($targets | Sort-Object @{ e = { $_.State -ne 'ok' } }, OldName)) {
+    $ok = $t.State -eq 'ok'
+    $i = $rg.Rows.Add($ok, $t.OldName, $t.NewName, $t.How, $RenameStateText[$t.State])
+    $row = $rg.Rows[$i]; $row.Tag = $t
+    if (-not $ok) { $row.Cells['Do'].ReadOnly = $true; $row.DefaultCellStyle.ForeColor = [System.Drawing.SystemColors]::GrayText }
+  }
+  # 今の名前をダブルクリックで、その場所をエクスプローラーで開く
+  $rg.Add_CellDoubleClick({ param($s, $e) Invoke-Safe {
+    if ($e.RowIndex -lt 0 -or $rg.Columns[$e.ColumnIndex].Name -eq 'Do') { return }
+    Start-Process explorer.exe "/select,`"$($rg.Rows[$e.RowIndex].Tag.Path)`""
+  } })
+  $rg.Add_CurrentCellDirtyStateChanged({ if ($rg.IsCurrentCellDirty) { $rg.CommitEdit('CurrentCellChange') } })
+  $lay.Controls.Add($rg, 0, 1)
+
+  $btns = New-Flow
+  $btnGo = New-Button '名前を変える' $null -Primary
+  $btnGo.Enabled = $okN -gt 0
+  $btnGo.Add_Click({ Invoke-Safe {
+    $chosen = @($rg.Rows | Where-Object { $_.Tag.State -eq 'ok' -and [bool]$_.Cells['Do'].Value })
+    if ($chosen.Count -eq 0) { Show-Info '名前を変えるフォルダにチェックを入れてください。'; return }
+    if (-not (Ask-YesNo "$($chosen.Count) 件のフォルダ・ファイルの名前を変えます。`n（ゲームを起動中のものは変えられません。閉じてから進めてください）`n`nよろしいですか？" '名前を変える確認')) { return }
+    foreach ($row in $rg.Rows) { if ($row.Tag.State -eq 'ok' -and -not [bool]$row.Cells['Do'].Value) { $row.Tag.State = 'skip' } }
+    $dlg.Close()
+    $r = Invoke-FolderRename $targets $RenameLogDir $script:Links $LinksPath
+    $msg = "$($r.Done) 件の名前を変えました。"
+    if (@($r.Failed).Count) {
+      $msg += "`n`n変えられなかったもの $(@($r.Failed).Count) 件:`n" + ((@($r.Failed) | Select-Object -First 10 | ForEach-Object { "・$($_.OldName)`n  → $($_.Reason)" }) -join "`n")
+      if (@($r.Failed).Count -gt 10) { $msg += "`n…ほか $(@($r.Failed).Count - 10) 件" }
+    }
+    if ($r.Log) { $msg += "`n`n記録: $(Split-Path $r.Log -Leaf)（「フォルダ名を戻す…」で戻せます）" }
+    Show-Info $msg 'フォルダ名をそろえた結果'
+    # フォルダ名が変わったので、候補を調べ直してチェックし直す
+    Run-Check
+  } })
+  $btnCancel = New-Button 'キャンセル' $null
+  $btnCancel.Add_Click({ $dlg.Close() })
+  $btns.Controls.Add($btnGo); $btns.Controls.Add($btnCancel)
+  $lay.Controls.Add($btns, 0, 2)
+  [void]$dlg.ShowDialog($form)
+}
+
+# 「フォルダ名をそろえる」の記録を選んで、名前を元に戻す
+function Undo-Rename {
+  if (-not (Test-Path -LiteralPath $RenameLogDir)) { Show-Info 'フォルダ名を変えた記録はまだありません。'; return }
+  $od = New-Object System.Windows.Forms.OpenFileDialog
+  $od.Title = '戻す記録を選ぶ'
+  $od.InitialDirectory = $RenameLogDir
+  $od.Filter = 'フォルダ名を変えた記録|rename-*.json'
+  if ($od.ShowDialog($form) -ne 'OK') { return }
+  if ($od.FileName -like '*.links.json') { Show-Error 'これは owned-links.json のバックアップです。rename-日時.json の方を選んでください。'; return }
+  $entries = @((Get-Content -LiteralPath $od.FileName -Raw -Encoding UTF8 | ConvertFrom-Json).entries | Where-Object done)
+  if ($entries.Count -eq 0) { Show-Info 'この記録で戻すものはありません（もう戻してあります）。'; return }
+  if (-not (Ask-YesNo "$($entries.Count) 件のフォルダ・ファイルの名前を元に戻します。`n（ゲームを起動中のものは戻せません）`n`nよろしいですか？" '戻す確認')) { return }
+  $u = Undo-FolderRename $od.FileName $script:Links $LinksPath
+  $msg = "$($u.Done) 件を元の名前に戻しました。"
+  if (@($u.Skipped).Count) {
+    $msg += "`n`n戻さなかったもの $(@($u.Skipped).Count) 件:`n" + ((@($u.Skipped) | Select-Object -First 10 | ForEach-Object { "・$($_.Name)`n  → $($_.Reason)" }) -join "`n")
+  }
+  Show-Info $msg '戻した結果'
+  if ($script:Results) { Run-Check }
 }
 
 function Fill-Grid {
