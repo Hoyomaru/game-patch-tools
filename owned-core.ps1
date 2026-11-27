@@ -259,7 +259,8 @@ function Clear-OwnedLink($Links, [string]$Code) {
 
 # フォルダ名・ファイル名から版を読む（「v1.02」「Ver.1.0.3」「ver23.11.13」など）。なければ空
 function Get-FolderVersion([string]$Name) {
-  if ($Name -match '(?i)(?:\bver(?:sion)?\.?\s*|\bv)(\d+(?:[._\-]\d+)*[a-z]?)(?![\w.])') {
+  # 前は英数字以外ならよい（\b だと「game_v1.02」の _ のあとを読めない）
+  if ($Name -match '(?i)(?:(?<![a-z0-9])ver(?:sion)?\.?\s*|(?<![a-z0-9])v)(\d+(?:[._\-]\d+)*[a-z]?)(?![\w.])') {
     return ($Matches[1] -replace '_', '.')
   }
   return ''
