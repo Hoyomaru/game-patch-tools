@@ -188,6 +188,11 @@ function ConvertFrom-DLsiteSearch([string]$Json) {
 
 # 検索する言葉で DLsite の R18 と全年齢の売り場を検索する（送るのは言葉だけ）。問い合わせの間は 800 ミリ秒あける。
 # 戻り値: Ok（どちらも返事が取れたか）/ Hits（Code / Title / Floor の一覧。取れた分）
+# DLsite の検索の URL。空白を %20 にすると DLsite が 403 で断るので + にする（+ そのものは %2B になる）
+function Get-DLsiteSearchUrl([string]$Floor, [string]$Term) {
+  return "https://www.dlsite.com/$Floor/fsr/ajax/=/language/jp/keyword/$([uri]::EscapeDataString($Term) -replace '%20', '+')/"
+}
+
 function Search-DLsite([string]$Term, [int]$TimeoutSec = 10) {
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
   $ok = $true
@@ -196,7 +201,7 @@ function Search-DLsite([string]$Term, [int]$TimeoutSec = 10) {
   foreach ($floor in $script:SearchFloors) {
     if (-not $first) { Start-Sleep -Milliseconds 800 }
     $first = $false
-    $url = "https://www.dlsite.com/$floor/fsr/ajax/=/language/jp/keyword/$([uri]::EscapeDataString($Term))/"
+    $url = Get-DLsiteSearchUrl $floor $Term
     try {
       $res = Invoke-WebRequest -Uri $url -UseBasicParsing -UserAgent 'Mozilla/5.0' -TimeoutSec $TimeoutSec
       $ms = New-Object IO.MemoryStream

@@ -152,3 +152,10 @@ Describe '最終レビューで見つかった点' {
     try { @(Find-InsideCodes (Join-Path $g 'many')).Count | Should Be 0 } finally { $script:InsideMaxFiles = 5000 }
   }
 }
+
+Describe 'Get-DLsiteSearchUrl' {
+  # DLsite は検索の言葉の中の %20（空白）を 403 で断るので、空白は + にする
+  It '空白は + にする' { Get-DLsiteSearchUrl 'maniax' 'magic girl' | Should Be 'https://www.dlsite.com/maniax/fsr/ajax/=/language/jp/keyword/magic+girl/' }
+  It '+ そのものは %2B のまま' { Get-DLsiteSearchUrl 'home' 'A+B' | Should Be 'https://www.dlsite.com/home/fsr/ajax/=/language/jp/keyword/A%2BB/' }
+  It '日本語と / は % で表す' { Get-DLsiteSearchUrl 'maniax' 'テスト/1' | Should Be 'https://www.dlsite.com/maniax/fsr/ajax/=/language/jp/keyword/%E3%83%86%E3%82%B9%E3%83%88%2F1/' }
+}
