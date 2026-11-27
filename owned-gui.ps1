@@ -536,7 +536,13 @@ function Move-ASFound {
          $(if ($plan.Created) { "`n・フォルダはまだないので作ります" } else { '' }) +
          $(if ($skipN) { "`n・「見送り」の印を付けた $skipN 作品は移しません" } else { '' }) +
          "`n`n移す前にバックアップを取ります。よろしいですか？"
+  $synced = Test-BookmarksSynced $target
+  if ($synced -and -not (Get-EdgeProfileDir $target)) { Show-Info $SyncedOtherBrowserMsg; return }
   if (-not (Ask-YesNo $msg 'まとめる確認')) { return }
+  if ($synced) {
+    if (Invoke-BookmarkOpInEdge $target 'move' $folder $codes $null $name.Trim()) { Refresh-Folders }
+    return
+  }
   if (-not (Wait-BrowserClosed $target)) { return }
   $r = Move-BookmarksToSubfolder $target $folder $name.Trim() $codes $BackupDir
   Show-Info "$($r.Moved.Count) 作品を移しました。`n（バックアップ: $(Split-Path $r.Backup -Leaf)）" 'まとめた結果'
@@ -985,7 +991,17 @@ function Invoke-BulkAdd([string]$text, [string]$target, [string]$folder, [bool]$
     $msg += "`n・見つからないゲームフォルダ $(@($script:MissingGameDirs).Count) か所は飛ばしました（その中の作品は「持っている」と判定されません）"
   }
   if ($plan.Added.Count -eq 0) { Show-Info ($msg -replace '^.*?。', '追加するものはありません。'); return $true }
+  $synced = Test-BookmarksSynced $target
+  if ($synced -and -not (Get-EdgeProfileDir $target)) { Show-Info $SyncedOtherBrowserMsg; return $false }
   if (-not (Ask-YesNo ($msg + "`n`n追加の前にバックアップを取ります。よろしいですか？") '追加の確認')) { return $false }
+  if ($synced) {
+    $send = @($items | ForEach-Object {
+      [pscustomobject]@{ Code = $_.Code; Url = $_.Url; Title = $(if ($_.Title -and $_.Title -ne '(タイトル不明)') { $_.Title } else { $_.Code }) }
+    })
+    $ok = Invoke-BookmarkOpInEdge $target 'add' $folder $null $send ''
+    if ($ok) { Refresh-Folders }
+    return $ok
+  }
   if (-not (Wait-BrowserClosed $target)) { return $false }
 
   $r = Add-BookmarksToFolder $target $folder $items $BackupDir
@@ -1005,6 +1021,50 @@ function Wait-BrowserClosed([string]$path) {
     if ($ans -ne 'Retry') { return $false }
   }
 }
+
+# ---------- 同期がオンのとき（拡張機能で書き換える） ----------
+
+$ExtensionDir = Join-Path $PSScriptRoot 'edge-extension'
+$script:ExtensionReady = $false
+
+# 同期がオンの Edge のブックマークを、拡張機能「所持チェック ブックマーク係」に書き換えてもらう。
+# Edge で DLsite のページを開き、ページに出る「実行する」をユーザーが押す。
+# 戻り値: 最後の URL まで進んだら $true
+function Invoke-BookmarkOpInEdge([string]$BookmarksPath, [string]$Op, [string]$Folder, [string[]]$Codes, $Items, [string]$Sub) {
+  $profileDir = Get-EdgeProfileDir $BookmarksPath
+  if (-not $profileDir) { return $false }
+  if (-not $script:ExtensionReady) {
+    $ans = Ask-YesNo ("このブックマークは Edge の同期がオンです。所持チェックが直接書き換えると、同期で元に戻されてしまいます。`n" +
+      "そのため、Edge の拡張機能「所持チェック ブックマーク係」に書き換えてもらいます。`n`n" +
+      "入れ方（最初の1回だけ）:`n1. Edge のアドレス欄に edge://extensions と入れて開く`n2. 左の「開発者モード」をオンにする`n" +
+      "3. 「展開して読み込み」を押し、次のフォルダを選ぶ`n   $ExtensionDir`n`n入れましたか？（「いいえ」なら何もしません）") '拡張機能を入れる'
+    if (-not $ans) { return $false }
+    $script:ExtensionReady = $true
+    Save-Settings
+  }
+  $urls = @(New-BookmarkOpUrls -Op $Op -Folder $Folder -Codes $Codes -Items $Items -Sub $Sub -RootIndex (Get-BookmarkRootIndex $BookmarksPath $Folder))
+  [void](Backup-BookmarksFile $BookmarksPath $BackupDir)
+  $before = (Get-Item -LiteralPath $BookmarksPath).LastWriteTimeUtc
+  for ($i = 0; $i -lt $urls.Count; $i++) {
+    try { Start-Process -FilePath 'msedge.exe' -ArgumentList "--profile-directory=`"$profileDir`"", $urls[$i] }
+    catch { Show-Error "Edge を開けませんでした。`n$($_.Exception.Message)"; return $false }
+    $part = if ($urls.Count -gt 1) { "（$($i + 1) / $($urls.Count) 回目）" } else { '' }
+    $ans = [System.Windows.Forms.MessageBox]::Show($form,
+      "Edge で DLsite のページを開きました$part。`n`nページの右下に出る内容を確かめて「実行する」を押し、結果が出たら OK を押してください。`n（ページに何も出ないときは、拡張機能が入っているか確かめてください）",
+      'Edge で実行する', 'OKCancel', 'Information')
+    if ($ans -ne 'OK') { return $false }
+  }
+  # Edge がファイルに書き出すまで少し待つ（最大 10 秒）
+  for ($t = 0; $t -lt 20; $t++) {
+    if ((Get-Item -LiteralPath $BookmarksPath).LastWriteTimeUtc -ne $before) { return $true }
+    Start-Sleep -Milliseconds 500
+  }
+  Show-Info "ブックマークのファイルがまだ書き換わっていません。`n「実行する」を押していなければ、何も変わっていません。押した場合は、Edge を一度閉じてから「チェック開始」を押し直してください。"
+  return $true
+}
+
+# 同期がオンで、拡張機能でも書き換えられない（Edge 以外の）ブックマークのときの知らせ
+$SyncedOtherBrowserMsg = '同期がオンの Edge 以外のブラウザ（Chrome など）のブックマークは書き換えられません（同期で元に戻されるため）。ブラウザで直接操作してください。'
 
 function Delete-Checked {
   $codes = @($script:DelState.GetEnumerator() | Where-Object Value | ForEach-Object Key)
@@ -1034,6 +1094,12 @@ function Delete-Checked {
 
   $report = New-Object System.Collections.Generic.List[string]
   foreach ($bf in $bmFiles) {
+    if (Test-BookmarksSynced $bf) {
+      if (-not (Get-EdgeProfileDir $bf)) { $report.Add("・$bf`n  → $SyncedOtherBrowserMsg"); continue }
+      if (Invoke-BookmarkOpInEdge $bf 'delete' $folder $codes $null '') { $report.Add("・$bf`n  → 同期がオンなので、Edge の拡張機能で消しました（消した数は Edge のページに出ています）") }
+      else { $report.Add("・$bf`n  → 途中でやめたため、最後まで消していないかもしれません") }
+      continue
+    }
     if (-not (Wait-BrowserClosed $bf)) { $report.Add("・$bf`n  → ブラウザが起動中のため、消していません"); continue }
     $r = Remove-BookmarksByCode $bf $codes $BackupDir -Folder $folder
     if ($r.Removed.Count -eq 0) { $report.Add("・$bf`n  → 該当するブックマークはありませんでした"); continue }
@@ -1054,6 +1120,10 @@ function Restore-Backup {
   $dlg.Filter = 'バックアップ|Bookmarks-*|すべてのファイル|*.*'
   if ($dlg.ShowDialog($form) -ne 'OK') { return }
   if (-not (Test-BookmarksFile $dlg.FileName)) { Show-Error 'このファイルはブックマークのバックアップではないようです。'; return }
+  if (Test-BookmarksSynced $target) {
+    Show-Info "同期がオンなので戻せません（ファイルを戻しても、同期で今の状態に戻されます）。`nEdge の「お気に入り」→「削除したお気に入りの復元」を使うか、同期をオフにしてから使ってください。"
+    return
+  }
   if (-not (Ask-YesNo "次のバックアップでブックマークを上書きします。`n`nバックアップ: $(Split-Path $dlg.FileName -Leaf)`n戻し先: $target`n`n今のブックマークも念のためバックアップしてから戻します。よろしいですか？" '復元の確認')) { return }
   if (-not (Wait-BrowserClosed $target)) { return }
   [void](Backup-BookmarksFile $target $BackupDir 'before-restore')
@@ -1070,6 +1140,7 @@ function Save-Settings {
     Depth = [int]$numDepth.Value
     Threshold = [double]$numTh.Value
     BookmarkFolder = (Get-SelectedFolder)
+    ExtensionReady = [bool]$script:ExtensionReady
   }
   try { [IO.File]::WriteAllText($SettingsPath, ($o | ConvertTo-Json), (New-Object Text.UTF8Encoding $false)) } catch { }
 }
@@ -1083,6 +1154,7 @@ function Load-Settings {
       # 手で書き換えて範囲外になっていても止まらないよう、範囲内に収めてから入れる
       if ($o.Depth) { $numDepth.Value = [Math]::Max($numDepth.Minimum, [Math]::Min($numDepth.Maximum, [decimal]$o.Depth)) }
       if ($o.Threshold) { $numTh.Value = [Math]::Max($numTh.Minimum, [Math]::Min($numTh.Maximum, [decimal]$o.Threshold)) }
+      $script:ExtensionReady = [bool]$o.ExtensionReady
       Refresh-Folders ([string]$o.BookmarkFolder)
       return
     } catch {

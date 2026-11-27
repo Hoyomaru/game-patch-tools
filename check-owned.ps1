@@ -79,6 +79,10 @@ if ($maybeRows.Count -gt 0 -and -not $SkipMaybe) {
 if ($codes.Count -eq 0) { Write-Host '消すブックマークはありません。'; return }
 
 foreach ($bf in $bmFiles) {
+  if (-not $DryRun -and (Test-BookmarksSynced $bf)) {
+    Write-Warning "$bf は同期がオンなので消しません（ファイルを書き換えても同期で戻されます）。所持チェックの画面（owned-gui）から、拡張機能で消してください。"
+    continue
+  }
   if (-not $SkipBrowserCheck) {
     $running = @(Get-RunningBrowser $bf)
     if ($running.Count -gt 0) {
