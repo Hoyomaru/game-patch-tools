@@ -540,7 +540,7 @@ function Move-ASFound {
   if ($synced -and -not (Get-EdgeProfileDir $target)) { Show-Info $SyncedOtherBrowserMsg; return }
   if (-not (Ask-YesNo $msg 'まとめる確認')) { return }
   if ($synced) {
-    if (Invoke-BookmarkOpInEdge $target 'move' $folder $codes $null $name.Trim()) { Refresh-Folders }
+    if ((Invoke-BookmarkOpInEdge $target 'move' $folder $codes $null $name.Trim()) -in 'changed', 'partial') { Refresh-Folders }
     return
   }
   if (-not (Wait-BrowserClosed $target)) { return }
@@ -998,9 +998,9 @@ function Invoke-BulkAdd([string]$text, [string]$target, [string]$folder, [bool]$
     $send = @($items | ForEach-Object {
       [pscustomobject]@{ Code = $_.Code; Url = $_.Url; Title = $(if ($_.Title -and $_.Title -ne '(タイトル不明)') { $_.Title } else { $_.Code }) }
     })
-    $ok = Invoke-BookmarkOpInEdge $target 'add' $folder $null $send ''
-    if ($ok) { Refresh-Folders }
-    return $ok
+    $r = Invoke-BookmarkOpInEdge $target 'add' $folder $null $send ''
+    if ($r -eq 'changed' -or $r -eq 'partial') { Refresh-Folders; return $true }
+    return $false
   }
   if (-not (Wait-BrowserClosed $target)) { return $false }
 
@@ -1029,38 +1029,40 @@ $script:ExtensionReady = $false
 
 # 同期がオンの Edge のブックマークを、拡張機能「所持チェック ブックマーク係」に書き換えてもらう。
 # Edge で DLsite のページを開き、ページに出る「実行する」をユーザーが押す。
-# 戻り値: 最後の URL まで進んだら $true
+# 戻り値: 'changed'（ファイルが書き換わった）・'partial'（途中でやめたが一部は書き換わった）・
+#         'unchanged'（最後まで進んだが書き換わらなかった）・'cancelled'（やめた・始められなかった）
 function Invoke-BookmarkOpInEdge([string]$BookmarksPath, [string]$Op, [string]$Folder, [string[]]$Codes, $Items, [string]$Sub) {
   $profileDir = Get-EdgeProfileDir $BookmarksPath
-  if (-not $profileDir) { return $false }
+  if (-not $profileDir) { return 'cancelled' }
   if (-not $script:ExtensionReady) {
     $ans = Ask-YesNo ("このブックマークは Edge の同期がオンです。所持チェックが直接書き換えると、同期で元に戻されてしまいます。`n" +
       "そのため、Edge の拡張機能「所持チェック ブックマーク係」に書き換えてもらいます。`n`n" +
       "入れ方（最初の1回だけ）:`n1. Edge のアドレス欄に edge://extensions と入れて開く`n2. 左の「開発者モード」をオンにする`n" +
       "3. 「展開して読み込み」を押し、次のフォルダを選ぶ`n   $ExtensionDir`n`n入れましたか？（「いいえ」なら何もしません）") '拡張機能を入れる'
-    if (-not $ans) { return $false }
+    if (-not $ans) { return 'cancelled' }
     $script:ExtensionReady = $true
     Save-Settings
   }
   $urls = @(New-BookmarkOpUrls -Op $Op -Folder $Folder -Codes $Codes -Items $Items -Sub $Sub -RootIndex (Get-BookmarkRootIndex $BookmarksPath $Folder))
   [void](Backup-BookmarksFile $BookmarksPath $BackupDir)
-  $before = (Get-Item -LiteralPath $BookmarksPath).LastWriteTimeUtc
+  $changed = $false
   for ($i = 0; $i -lt $urls.Count; $i++) {
+    # 回ごとに、開く前の更新日時を取る（前の回の書き出しを、この回の分と取り違えないように）
+    $before = (Get-Item -LiteralPath $BookmarksPath).LastWriteTimeUtc
     try { Start-Process -FilePath 'msedge.exe' -ArgumentList "--profile-directory=`"$profileDir`"", $urls[$i] }
-    catch { Show-Error "Edge を開けませんでした。`n$($_.Exception.Message)"; return $false }
+    catch { Show-Error "Edge を開けませんでした。`n$($_.Exception.Message)"; return $(if ($changed) { 'partial' } else { 'cancelled' }) }
     $part = if ($urls.Count -gt 1) { "（$($i + 1) / $($urls.Count) 回目）" } else { '' }
     $ans = [System.Windows.Forms.MessageBox]::Show($form,
       "Edge で DLsite のページを開きました$part。`n`nページの右下に出る内容を確かめて「実行する」を押し、結果が出たら OK を押してください。`n（ページに何も出ないときは、拡張機能が入っているか確かめてください）",
       'Edge で実行する', 'OKCancel', 'Information')
-    if ($ans -ne 'OK') { return $false }
+    if ($ans -ne 'OK') { return $(if ($changed) { 'partial' } else { 'cancelled' }) }
+    # Edge がファイルに書き出すまで待つ（最大 10 秒）
+    $form.Cursor = 'WaitCursor'
+    try { if (Wait-FileChanged $BookmarksPath $before 10000) { $changed = $true } } finally { $form.Cursor = 'Default' }
   }
-  # Edge がファイルに書き出すまで少し待つ（最大 10 秒）
-  for ($t = 0; $t -lt 20; $t++) {
-    if ((Get-Item -LiteralPath $BookmarksPath).LastWriteTimeUtc -ne $before) { return $true }
-    Start-Sleep -Milliseconds 500
-  }
-  Show-Info "ブックマークのファイルがまだ書き換わっていません。`n「実行する」を押していなければ、何も変わっていません。押した場合は、Edge を一度閉じてから「チェック開始」を押し直してください。"
-  return $true
+  if ($changed) { return 'changed' }
+  Show-Info "ブックマークのファイルが書き換わっていません。`n「実行する」を押していなければ、何も変わっていません。押した場合は、Edge を一度閉じてから「チェック開始」を押し直してください。"
+  return 'unchanged'
 }
 
 # 同期がオンで、拡張機能でも書き換えられない（Edge 以外の）ブックマークのときの知らせ
@@ -1096,8 +1098,12 @@ function Delete-Checked {
   foreach ($bf in $bmFiles) {
     if (Test-BookmarksSynced $bf) {
       if (-not (Get-EdgeProfileDir $bf)) { $report.Add("・$bf`n  → $SyncedOtherBrowserMsg"); continue }
-      if (Invoke-BookmarkOpInEdge $bf 'delete' $folder $codes $null '') { $report.Add("・$bf`n  → 同期がオンなので、Edge の拡張機能で消しました（消した数は Edge のページに出ています）") }
-      else { $report.Add("・$bf`n  → 途中でやめたため、最後まで消していないかもしれません") }
+      switch (Invoke-BookmarkOpInEdge $bf 'delete' $folder $codes $null '') {
+        'changed'   { $report.Add("・$bf`n  → 同期がオンなので、Edge の拡張機能で消しました（消した数は Edge のページに出ています）") }
+        'partial'   { $report.Add("・$bf`n  → 途中でやめたため、一部だけ消しました") }
+        'unchanged' { $report.Add("・$bf`n  → 変わっていません（Edge で「実行する」を押していない、または当てはまるものがありませんでした）") }
+        default     { $report.Add("・$bf`n  → やめたため、消していません") }
+      }
       continue
     }
     if (-not (Wait-BrowserClosed $bf)) { $report.Add("・$bf`n  → ブラウザが起動中のため、消していません"); continue }

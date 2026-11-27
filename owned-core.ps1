@@ -541,6 +541,16 @@ function Get-BookmarkRootIndex([string]$Path, [string]$Folder) {
   return -1
 }
 
+# ファイルの更新日時が $Since から変わるのを、最大 $TimeoutMs ミリ秒待つ。変わったら $true
+function Wait-FileChanged([string]$Path, [datetime]$Since, [int]$TimeoutMs = 10000) {
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  while ($true) {
+    try { if ((Get-Item -LiteralPath $Path).LastWriteTimeUtc -ne $Since) { return $true } } catch { }
+    if ($sw.ElapsedMilliseconds -ge $TimeoutMs) { return $false }
+    Start-Sleep -Milliseconds 250
+  }
+}
+
 # 拡張機能に渡す URL（https://www.dlsite.com/maniax/#gpt-bookmarks=<JSON>）を作る。
 # 1本が $MaxLen を超えるなら、codes（add は items）を分けて何本かにする
 function New-BookmarkOpUrls([string]$Op, [string]$Folder, [string[]]$Codes, $Items, [string]$Sub, [int]$RootIndex = -1, [int]$MaxLen = 30000) {

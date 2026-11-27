@@ -78,3 +78,19 @@ Describe 'New-BookmarkOpUrls' {
     $all[0].url | Should Be 'https://www.dlsite.com/maniax/work/=/product_id/RJ01000001.html'
   }
 }
+
+Describe 'Wait-FileChanged' {
+  It '更新日時が変わればすぐ真' {
+    $p = Join-Path $TestDrive 'w1'; Set-Content -LiteralPath $p -Value 'a'
+    $since = (Get-Item -LiteralPath $p).LastWriteTimeUtc
+    (Get-Item -LiteralPath $p).LastWriteTimeUtc = $since.AddSeconds(5)
+    Wait-FileChanged $p $since 3000 | Should Be $true
+  }
+  It '変わらなければ待ったあと偽' {
+    $p = Join-Path $TestDrive 'w2'; Set-Content -LiteralPath $p -Value 'a'
+    $since = (Get-Item -LiteralPath $p).LastWriteTimeUtc
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    Wait-FileChanged $p $since 600 | Should Be $false
+    $sw.ElapsedMilliseconds | Should BeGreaterThan 500
+  }
+}
