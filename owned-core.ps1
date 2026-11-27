@@ -510,6 +510,66 @@ function Save-BookmarksJson([string]$Path, $Json) {
   [IO.File]::WriteAllText($Path, ($Json | ConvertTo-Json -Depth 100), (New-Object Text.UTF8Encoding $false))
 }
 
+# ---------- 5b. 同期がオンのとき（拡張機能で書き換える） ----------
+
+# Bookmarks に sync_metadata があって空でなければ、同期がオンとみなす。
+# 同期がオンのファイルを外から書き換えると、次に起動したとき同期で戻される
+function Test-BookmarksSynced([string]$Path) {
+  try {
+    $json = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    return [bool]("$($json.sync_metadata)".Trim())
+  } catch { return $false }
+}
+
+# Edge の Bookmarks なら、そのプロフィールのフォルダ名（Default・Profile 2 など）を返す。ほかは ''
+function Get-EdgeProfileDir([string]$Path) {
+  if ($Path -match '\\Microsoft\\Edge\\User Data\\([^\\]+)\\Bookmarks$') { return $Matches[1] }
+  return ''
+}
+
+# フォルダの道順の最初（ルートの名前）が、ルートの何番目か（0=お気に入りバー、1=その他、2=モバイル）。
+# 拡張機能は、ルートの名前が合わないとき（言語の違いなど）この位置で探す。見つからなければ -1
+function Get-BookmarkRootIndex([string]$Path, [string]$Folder) {
+  if (-not $Folder) { return -1 }
+  $first = ($Folder -split ' / ')[0]
+  try { $json = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return -1 }
+  $keys = 'bookmark_bar', 'other', 'synced'
+  for ($i = 0; $i -lt $keys.Count; $i++) {
+    $r = $json.roots.($keys[$i])
+    if ($r -and $r.name -eq $first) { return $i }
+  }
+  return -1
+}
+
+# 拡張機能に渡す URL（https://www.dlsite.com/maniax/#gpt-bookmarks=<JSON>）を作る。
+# 1本が $MaxLen を超えるなら、codes（add は items）を分けて何本かにする
+function New-BookmarkOpUrls([string]$Op, [string]$Folder, [string[]]$Codes, $Items, [string]$Sub, [int]$RootIndex = -1, [int]$MaxLen = 30000) {
+  $prefix = 'https://www.dlsite.com/maniax/#gpt-bookmarks='
+  $list = if ($Op -eq 'add') {
+    @(foreach ($it in @($Items)) { if ($it) { [ordered]@{ code = "$($it.Code)"; title = "$($it.Title)"; url = "$($it.Url)" } } })
+  } else { @($Codes | Where-Object { $_ }) }
+
+  $make = {
+    param($part)
+    $o = [ordered]@{ v = 1; op = $Op; folder = $Folder; root = $RootIndex; codes = @(); items = @(); sub = $Sub }
+    if ($Op -eq 'add') { $o.items = @($part) } else { $o.codes = @($part) }
+    $prefix + [uri]::EscapeDataString(($o | ConvertTo-Json -Depth 5 -Compress))
+  }
+
+  $urls = New-Object System.Collections.Generic.List[string]
+  $cur = New-Object System.Collections.Generic.List[object]
+  foreach ($x in $list) {
+    $cur.Add($x)
+    if ($cur.Count -gt 1 -and (& $make $cur.ToArray()).Length -gt $MaxLen) {
+      $cur.RemoveAt($cur.Count - 1)
+      $urls.Add((& $make $cur.ToArray()))
+      $cur.Clear(); $cur.Add($x)
+    }
+  }
+  if ($cur.Count -gt 0 -or $urls.Count -eq 0) { $urls.Add((& $make $cur.ToArray())) }
+  return $urls.ToArray()
+}
+
 # ---------- 6. まとめて追加 ----------
 
 # 文字列（URL の羅列、Session Buddy のテキストなど）から DLsite の作品を取り出す
