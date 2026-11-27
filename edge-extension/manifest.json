@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "所持チェック ブックマーク係",
+  "version": "1.0.0",
+  "description": "所持チェックから頼まれたお気に入りを、ブラウザの正式な仕組みで消す・足す・まとめます（同期で戻らないように）。ネットには何も送りません。",
+  "permissions": ["bookmarks"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.dlsite.com/*"],
+      "js": ["ops.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
