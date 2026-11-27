@@ -3,6 +3,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'owned-core.ps1')
 . (Join-Path $PSScriptRoot 'owned-identify.ps1')
+. (Join-Path $PSScriptRoot 'owned-stores.ps1')
 . (Join-Path $PSScriptRoot 'owned-rename.ps1')
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing

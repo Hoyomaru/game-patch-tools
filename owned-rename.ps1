@@ -38,10 +38,12 @@ function New-RenameName([string]$Code, [string]$Title, [string]$OldName, [bool]$
   $p = $ParentPath.TrimEnd('\').Length + 1
   $nameMax = [Math]::Min($script:RenameMaxPath - $p, 259 - $p - $InnerLen)
   $nameMax = [Math]::Max($nameMax, $OldName.Length)
-  $room = $nameMax - ($Code.Length + 1) - $tail.Length
+  # $Code は名前の頭（RJ番号・「Steam 番号」・お店の名前）。空なら頭を付けない
+  $head = if ($Code) { (ConvertTo-SafeFileName $Code) + ' ' } else { '' }
+  $room = $nameMax - $head.Length - $tail.Length
   if ($t.Length -gt $room) { $t = (ConvertTo-SafeFileName $t.Substring(0, [Math]::Max(1, $room))) }
   if (-not $t) { return '' }
-  return "$Code $t$tail"
+  return "$head$t$tail"
 }
 
 # フォルダの中のいちばん長いパスの、フォルダより後ろの長さ（先頭の \ を含む）。中が空なら 0
@@ -125,6 +127,11 @@ function Get-UnknownTargets($Candidates, [string[]]$ExcludePaths, [string[]]$Gam
     }
     $t = New-RenameTarget '' $w.Path $w.OldName $w.IsArchive '' 'nocode' '' $false
     $t.Choices = @($codes | ForEach-Object { [pscustomobject]@{ Code = $_; Title = '' } })
+    # Steam 版の印（steam_appid.txt）があれば、候補の先頭に Steam の番号を置く（チェックは付けない）
+    if ($codes.Count -eq 0 -and -not $w.IsArchive) {
+      $appid = Find-SteamAppId $w.Path
+      if ($appid) { $t.Choices = @([pscustomobject]@{ Code = "Steam $appid"; Title = '' }) }
+    }
     $inner = Get-InnerGameTitle $w.Path
     # ゲームの中の作品名にも版（v1.1.0 など）が付いていることがあるので、フォルダ名と同じくゴミを取る
     $innerTerm = if ($inner) { New-SearchTerm $inner $false } else { '' }
@@ -150,10 +157,19 @@ function Set-SearchResults($Targets, [hashtable]$Cache) {
 
 # 自分で入れた RJ番号か DLsite の URL から番号を取り出して行に入れる。取り出せなければ $false
 function Set-TargetCode($Target, [string]$Text) {
-  if ($Text -notmatch $script:CodeRe) { return $false }
-  $Target.Code = $Matches[1].ToUpperInvariant()
-  $Target.Clue = 'manual'; $Target.State = 'pending'; $Target.NewName = ''; $Target.NewPath = ''
+  $code = ConvertTo-StoreCode $Text
+  if (-not $code) { return $false }
+  $Target.Code = $code
+  $Target.Clue = $(if ($code -match '^(Steam|FANZA) ') { 'store' } else { 'manual' })
+  $Target.State = 'pending'; $Target.NewName = ''; $Target.NewPath = ''
   return $true
+}
+
+# 作品名（とお店の名前）を自分で入れる。Code を返す（呼ぶ側が作品名の表に Code → 作品名 を入れる）
+function Set-TargetManual($Target, [string]$Store, [string]$Title) {
+  $Target.Code = New-ManualCode $Store $Title
+  $Target.Clue = 'manual'; $Target.State = 'pending'; $Target.NewName = ''; $Target.NewPath = ''
+  return $Target.Code
 }
 
 # 番号が変わったあとに、番号のある行の新しい名前と状態を作り直す（'multi' と 'skip' はそのまま）。
@@ -177,7 +193,7 @@ function Set-RenameNames($Targets, [hashtable]$Titles) {
     if (-not $title) { $t.State = 'notitle'; continue }
     $parent = Split-Path -Parent $t.Path
     $inner = if ($t.IsArchive) { 0 } else { Get-InnerPathLength $t.Path }
-    $t.NewName = New-RenameName $t.Code $title $t.OldName $t.IsArchive $parent $inner
+    $t.NewName = New-RenameName (Get-CodePrefix $t.Code) $title $t.OldName $t.IsArchive $parent $inner
     if (-not $t.NewName) { $t.State = 'notitle'; continue }
     $t.NewPath = Join-Path $parent $t.NewName
     $t.State = if (Test-Path -LiteralPath $t.NewPath) { 'exists' } else { 'ok' }
@@ -197,6 +213,18 @@ function Update-LinkPaths($Links, [string]$OldPath, [string]$NewPath) {
   }
   foreach ($k in @($Links.Same.Keys)) { $Links.Same[$k] = & $fix ([string]$Links.Same[$k]) }
   foreach ($k in @($Links.Diff.Keys)) { $Links.Diff[$k] = @(@($Links.Diff[$k]) | ForEach-Object { & $fix ([string]$_) }) }
+}
+
+# これまでに名前を変えたフォルダ（rename-*.json の done が真の new）。戻したものは done が偽になるので入らない。読めない記録は飛ばす
+function Get-RenamedPaths([string]$LogDir) {
+  $out = New-Object System.Collections.Generic.List[string]
+  if (-not $LogDir -or -not [IO.Directory]::Exists($LogDir)) { return $out.ToArray() }
+  foreach ($f in @(Get-ChildItem -LiteralPath $LogDir -Filter 'rename-*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.links.json' })) {
+    try {
+      foreach ($e in @((Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json).entries)) { if ($e -and $e.done -and $e.new) { $out.Add([string]$e.new) } }
+    } catch { }
+  }
+  return $out.ToArray()
 }
 
 function Write-RenameLog([string]$Path, $Entries) {

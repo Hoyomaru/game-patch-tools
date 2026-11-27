@@ -5,6 +5,7 @@
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'owned-core.ps1')
 . (Join-Path $root 'owned-identify.ps1')
+. (Join-Path $root 'owned-stores.ps1')
 . (Join-Path $root 'owned-rename.ps1')
 
 Describe 'Get-FolderVersion' {
@@ -266,5 +267,68 @@ Describe '最終レビュー：片方の売り場が失敗したとき' {
     $t.State | Should Be 'nocode'
     $t.Auto | Should Be $false
     @($t.Choices)[0].Code | Should Be 'RJ00000901'
+  }
+}
+
+Describe 'DLsite 以外のお店・自分で入れた名前' {
+  $g = Join-Path $TestDrive 'stores'
+  New-TestDirs $g @('kakuu_v1.02', 'booth_v1.02', 'noshop_v1.02', 'x', 'y')
+  $mk = { param($n) [pscustomobject]@{ Code = ''; Path = (Join-Path $g $n); OldName = $n; IsArchive = $false; How = ''; State = 'nocode'; NewName = ''; NewPath = ''; Clue = 'search'; Choices = @(); Auto = $false; Term = $n; FromInnerTitle = $false } }
+
+  It 'Steam の URL は Steam の Code・決め手は store' {
+    $t = & $mk 'kakuu_v1.02'
+    Set-TargetCode $t 'https://store.steampowered.com/app/1234560/Kakuu/' | Should Be $true
+    $t.Code | Should Be 'Steam 1234560'; $t.Clue | Should Be 'store'; $t.State | Should Be 'pending'
+  }
+  It 'RJ番号なら決め手は今までどおり manual' { $t = & $mk 'x'; [void](Set-TargetCode $t 'RJ00000701'); $t.Clue | Should Be 'manual' }
+  It 'Steam の名前は「Steam 番号 作品名 v版」' {
+    $t = & $mk 'kakuu_v1.02'; [void](Set-TargetCode $t 'steam 1234560')
+    Set-RenameNames @($t) @{ 'Steam 1234560' = '架空のゲーム' }
+    $t.State | Should Be 'ok'; $t.NewName | Should Be 'Steam 1234560 架空のゲーム v1.02'
+  }
+  It '自分で入れた名前は「お店 作品名 v版」' {
+    $t = & $mk 'booth_v1.02'
+    $c = Set-TargetManual $t 'BOOTH' 'かくう'
+    $t.Code | Should Be $c; $t.Clue | Should Be 'manual'; $t.State | Should Be 'pending'
+    Set-RenameNames @($t) @{ $c = 'かくう' }
+    $t.NewName | Should Be 'BOOTH かくう v1.02'
+  }
+  It 'お店が空なら「作品名 v版」' {
+    $t = & $mk 'noshop_v1.02'
+    $c = Set-TargetManual $t '' 'かくう'
+    Set-RenameNames @($t) @{ $c = 'かくう' }
+    $t.NewName | Should Be 'かくう v1.02'
+  }
+  It '同じ Steam の番号が2つのフォルダにあれば両方 dupcode' {
+    $a = & $mk 'x'; $b = & $mk 'y'
+    [void](Set-TargetCode $a 'steam 1234560'); [void](Set-TargetCode $b 'steam 1234560')
+    Update-TargetStates @($a, $b) @{ 'Steam 1234560' = '架空のゲーム' }
+    $a.State | Should Be 'dupcode'; $b.State | Should Be 'dupcode'
+  }
+}
+
+Describe 'Get-RenamedPaths' {
+  $d = Join-Path $TestDrive 'logs'
+  New-Item -ItemType Directory -Force -Path $d | Out-Null
+  [IO.File]::WriteAllText((Join-Path $d 'rename-20261127-100000-000.json'), (@{ entries = @(@{ old = 'E:\G\a'; new = 'E:\G\Steam 1 A'; done = $true }, @{ old = 'E:\G\b'; new = 'E:\G\B'; done = $false }) } | ConvertTo-Json -Depth 4))
+  [IO.File]::WriteAllText((Join-Path $d 'rename-20261127-110000-000.json'), '{broken')
+  [IO.File]::WriteAllText((Join-Path $d 'rename-20261127-100000-000.links.json'), (@{ entries = @(@{ old = 'x'; new = 'E:\G\links'; done = $true }) } | ConvertTo-Json -Depth 4))
+  It 'done が真の new だけ（壊れたファイル・.links.json は飛ばす）' { @(Get-RenamedPaths $d) -join '|' | Should Be 'E:\G\Steam 1 A' }
+  It 'フォルダがなければ空' { @(Get-RenamedPaths (Join-Path $TestDrive 'nai')).Count | Should Be 0 }
+}
+
+Describe 'Find-SteamAppId と候補' {
+  $g = Join-Path $TestDrive 'steamid'
+  New-TestFile2 (Join-Path $g 'top\Game.exe'); New-TestFile2 (Join-Path $g 'top\steam_appid.txt') "1234560`r`n"
+  New-TestFile2 (Join-Path $g 'sub\Game.exe'); New-TestFile2 (Join-Path $g 'sub\bin\steam_appid.txt') '7654321'
+  New-TestFile2 (Join-Path $g 'bad\Game.exe'); New-TestFile2 (Join-Path $g 'bad\steam_appid.txt') 'abc'
+  It '直下' { Find-SteamAppId (Join-Path $g 'top') | Should Be '1234560' }
+  It '1つ下のフォルダ' { Find-SteamAppId (Join-Path $g 'sub') | Should Be '7654321' }
+  It '中身が数字でなければ空' { Find-SteamAppId (Join-Path $g 'bad') | Should Be '' }
+  It 'ブックマークにない作品の候補の先頭に Steam の番号（チェックは付けない）' {
+    $t = @(Get-UnknownTargets (Get-GameCandidates @($g) 2) @() @($g))
+    $r = $t | Where-Object OldName -eq 'top'
+    @($r.Choices)[0].Code | Should Be 'Steam 1234560'
+    $r.State | Should Be 'nocode'; $r.Auto | Should Be $false
   }
 }

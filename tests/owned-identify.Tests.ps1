@@ -5,6 +5,7 @@
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'owned-core.ps1')
 . (Join-Path $root 'owned-identify.ps1')
+. (Join-Path $root 'owned-stores.ps1')
 
 function New-TestDirs([string]$base, [string[]]$rel) {
   foreach ($r in $rel) { New-Item -ItemType Directory -Force -Path (Join-Path $base $r) | Out-Null }

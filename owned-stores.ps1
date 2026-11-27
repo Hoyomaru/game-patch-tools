@@ -116,3 +116,19 @@ function Get-StoreTitles([string[]]$Codes) {
   }
   return $titles
 }
+
+# ---------- 3. Steam 版の印 ----------
+
+# <Path>\steam_appid.txt か、直下のフォルダの steam_appid.txt の中身が数字だけならその数字。ほかは ''
+function Find-SteamAppId([string]$Path) {
+  if (-not [IO.Directory]::Exists($Path)) { return '' }
+  $dirs = @($Path)
+  try { $dirs += @([IO.Directory]::EnumerateDirectories($Path)) } catch { }
+  foreach ($d in $dirs) {
+    $f = Join-Path $d 'steam_appid.txt'
+    if (-not [IO.File]::Exists($f)) { continue }
+    try { $s = [IO.File]::ReadAllText($f).Trim() } catch { continue }
+    if ($s -match '^\d+$') { return $s }
+  }
+  return ''
+}
