@@ -4,6 +4,7 @@
 
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'owned-core.ps1')
+. (Join-Path $root 'owned-identify.ps1')
 . (Join-Path $root 'owned-rename.ps1')
 
 Describe 'Get-FolderVersion' {
@@ -201,5 +202,57 @@ Describe '最終レビューで見つかった点' {
     $dirs = @($g3, (Join-Path $g3 'おや\こ'))
     $c3 = Get-GameCandidates @($g3) 2
     @(Get-RenameTargets @(W 'RJ00000053' 'おや') $c3 0.6 (New-TestLinks) $dirs).Count | Should Be 0
+  }
+}
+
+function New-TestFile2([string]$path, [string]$text = 'x') {
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+  [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding $false))
+}
+
+Describe 'Get-UnknownTargets / Set-SearchResults' {
+  $g = Join-Path $TestDrive 'unk'
+  New-TestFile2 (Join-Path $g 'naka\Game.exe'); New-TestFile2 (Join-Path $g 'naka\readme.txt') 'RJ00000501'
+  New-TestFile2 (Join-Path $g 'mv\Game.exe'); New-TestFile2 (Join-Path $g 'mv\www\data\System.json') '{"gameTitle":"架空のRPG"}'
+  New-TestFile2 (Join-Path $g 'tekitou\Game.exe')
+  New-TestFile2 (Join-Path $g 'futatsu\Game.exe'); New-TestFile2 (Join-Path $g 'futatsu\a.txt') 'RJ00000502 RJ00000503'
+  $cands = Get-GameCandidates @($g) 2
+  $t = @(Get-UnknownTargets $cands @() @($g))
+  $row = { param($n) $t | Where-Object OldName -eq $n }
+
+  It '1.8.0 の行と同じ形の項目がある' { (& $row 'naka').PSObject.Properties.Name -contains 'NewPath' | Should Be $true }
+  It '中の番号が1つなら pending・inside・Auto' { $r = & $row 'naka'; $r.Code | Should Be 'RJ00000501'; $r.Clue | Should Be 'inside'; $r.Auto | Should Be $true; $r.State | Should Be 'pending' }
+  It '中の作品名があれば検索語にする' { $r = & $row 'mv'; $r.Term | Should Be '架空のRPG'; $r.FromInnerTitle | Should Be $true; $r.State | Should Be 'nocode' }
+  It 'なければフォルダ名を検索語にする' { $r = & $row 'tekitou'; $r.Term | Should Be 'tekitou'; $r.FromInnerTitle | Should Be $false }
+  It '中の番号が2つなら候補に並べて nocode' { $r = & $row 'futatsu'; $r.State | Should Be 'nocode'; @($r.Choices | ForEach-Object Code) -join ',' | Should Be 'RJ00000502,RJ00000503' }
+
+  $cache = @{
+    '架空のRPG' = [pscustomobject]@{ Ok = $true; At = '2026-11-27'; Hits = @([pscustomobject]@{ Code = 'RJ00000510'; Title = '架空のRPG'; Floor = 'maniax' }, [pscustomobject]@{ Code = 'RJ00000511'; Title = '架空のRPG2'; Floor = 'maniax' }) }
+    'tekitou' = [pscustomobject]@{ Ok = $true; At = '2026-11-27'; Hits = @([pscustomobject]@{ Code = 'RJ00000520'; Title = 'tekitou'; Floor = 'home' }) }
+  }
+  Set-SearchResults $t $cache
+  It '中の作品名で一致が1つなら search-exact・Auto・pending' { $r = & $row 'mv'; $r.Code | Should Be 'RJ00000510'; $r.Clue | Should Be 'search-exact'; $r.Auto | Should Be $true; $r.State | Should Be 'pending' }
+  It 'フォルダ名の検索は候補だけで nocode のまま' { $r = & $row 'tekitou'; $r.State | Should Be 'nocode'; $r.Clue | Should Be 'search'; @($r.Choices)[0].Code | Should Be 'RJ00000520' }
+}
+
+Describe 'Set-TargetCode' {
+  $mk = { [pscustomobject]@{ Code = ''; Path = 'E:\G\a'; OldName = 'a'; IsArchive = $false; How = ''; State = 'nocode'; NewName = 'x'; NewPath = 'y'; Clue = 'search'; Choices = @(); Auto = $false; Term = 'a'; FromInnerTitle = $false } }
+  It 'URL から取り出す（大文字にする）' { $t = & $mk; Set-TargetCode $t 'https://www.dlsite.com/maniax/work/=/product_id/rj00000401.html' | Should Be $true; $t.Code | Should Be 'RJ00000401'; $t.Clue | Should Be 'manual'; $t.State | Should Be 'pending'; $t.NewName | Should Be '' }
+  It '空白入りの番号も受け付ける' { $t = & $mk; Set-TargetCode $t '  RJ00000402 ' | Should Be $true; $t.Code | Should Be 'RJ00000402' }
+  It '番号がなければ受け付けない' { $t = & $mk; Set-TargetCode $t 'abc' | Should Be $false; $t.Code | Should Be '' }
+}
+
+Describe 'Update-TargetStates' {
+  $g = Join-Path $TestDrive 'dup'
+  New-TestDirs $g @('a', 'b', 'c')
+  $mk = { param($n, $code) [pscustomobject]@{ Code = $code; Path = (Join-Path $g $n); OldName = $n; IsArchive = $false; How = ''; State = 'pending'; NewName = ''; NewPath = ''; Clue = 'manual'; Choices = @(); Auto = $true; Term = ''; FromInnerTitle = $false } }
+  $ts = @((& $mk 'a' 'RJ00000601'), (& $mk 'b' 'RJ00000601'), (& $mk 'c' 'RJ00000602'))
+  $titles = @{ 'RJ00000601' = '架空A'; 'RJ00000602' = '架空C' }
+  Update-TargetStates $ts $titles
+  It '同じ番号が2つのフォルダにあれば両方 dupcode' { $ts[0].State | Should Be 'dupcode'; $ts[1].State | Should Be 'dupcode'; $ts[2].State | Should Be 'ok' }
+  It '番号を直せば戻る' {
+    [void](Set-TargetCode $ts[1] 'RJ00000603'); $titles['RJ00000603'] = '架空B'
+    Update-TargetStates $ts $titles
+    $ts[0].State | Should Be 'ok'; $ts[1].State | Should Be 'ok'; $ts[1].NewName | Should Be 'RJ00000603 架空B'
   }
 }

@@ -88,8 +88,69 @@ function Get-RenameTargets($Wishlist, $Candidates, [double]$Threshold, $Links, [
     $oldName = Split-Path -Leaf $c.Path
     $state = if ($g.Hits.Count -gt 1) { 'multi' } else { 'pending' }
     foreach ($r in $g.Hits) {
-      [pscustomobject]@{ Code = $r.Code; Path = [string]$c.Path; OldName = $oldName; IsArchive = $isArchive; How = $r.How; State = $state; NewName = ''; NewPath = '' }
+      New-RenameTarget $r.Code ([string]$c.Path) $oldName $isArchive $r.How $state 'bookmark' $true
     }
+  }
+}
+
+# 名前を変える対象の1行。Clue（手がかり）: 'bookmark' / 'inside' / 'search-exact' / 'search' / 'manual' / ''
+# Choices: RJ番号の候補（Code / Title）、Auto: 最初からチェックを付けるか、Term: 検索する言葉、FromInnerTitle: Term がゲームの中の作品名か
+function New-RenameTarget([string]$Code, [string]$Path, [string]$OldName, [bool]$IsArchive, [string]$How, [string]$State, [string]$Clue, [bool]$Auto) {
+  [pscustomobject]@{
+    Code = $Code; Path = $Path; OldName = $OldName; IsArchive = $IsArchive; How = $How; State = $State; NewName = ''; NewPath = ''
+    Clue = $Clue; Choices = @(); Auto = $Auto; Term = ''; FromInnerTitle = $false
+  }
+}
+
+# ブックマークに当たらない作品（Get-UnknownWorks）を対象の行にする。
+#   中に書いてある RJ番号が1つ → Code を入れて State = 'pending'、Clue = 'inside'、Auto
+#   それ以外 → State = 'nocode'。中で2つ以上見つかった番号は Choices に。Term はゲームの中の作品名、なければフォルダ名から作る
+function Get-UnknownTargets($Candidates, [string[]]$ExcludePaths, [string[]]$GameDirs) {
+  foreach ($w in @(Get-UnknownWorks $Candidates $ExcludePaths $GameDirs)) {
+    $codes = @(Find-InsideCodes $w.Path)
+    if ($codes.Count -eq 1) {
+      New-RenameTarget $codes[0] $w.Path $w.OldName $w.IsArchive '' 'pending' 'inside' $true
+      continue
+    }
+    $t = New-RenameTarget '' $w.Path $w.OldName $w.IsArchive '' 'nocode' '' $false
+    $t.Choices = @($codes | ForEach-Object { [pscustomobject]@{ Code = $_; Title = '' } })
+    $inner = Get-InnerGameTitle $w.Path
+    if ($inner) { $t.Term = $inner; $t.FromInnerTitle = $true } else { $t.Term = New-SearchTerm $w.OldName $w.IsArchive }
+    $t
+  }
+}
+
+# State = 'nocode' の行に、保存した検索結果（Read-SearchCache の形）から候補を足す。
+# Select-AutoCode の番号があれば Code を入れて State = 'pending'、Clue = 'search-exact'、Auto。候補だけなら Clue = 'search'
+function Set-SearchResults($Targets, [hashtable]$Cache) {
+  foreach ($t in @($Targets)) {
+    if ($t.State -ne 'nocode' -or -not $t.Term -or -not $Cache.ContainsKey($t.Term)) { continue }
+    $hits = @($Cache[$t.Term].Hits | Where-Object { $_ })
+    $have = @($t.Choices | ForEach-Object Code)
+    $t.Choices = @(@($t.Choices) + @($hits | Where-Object { $have -notcontains $_.Code } | ForEach-Object { [pscustomobject]@{ Code = $_.Code; Title = $_.Title } }))
+    $auto = Select-AutoCode $hits $t.Term $t.FromInnerTitle
+    if ($auto) { $t.Code = $auto; $t.Clue = 'search-exact'; $t.Auto = $true; $t.State = 'pending' }
+    elseif ($hits.Count) { $t.Clue = 'search' }
+  }
+}
+
+# 自分で入れた RJ番号か DLsite の URL から番号を取り出して行に入れる。取り出せなければ $false
+function Set-TargetCode($Target, [string]$Text) {
+  if ($Text -notmatch $script:CodeRe) { return $false }
+  $Target.Code = $Matches[1].ToUpperInvariant()
+  $Target.Clue = 'manual'; $Target.State = 'pending'; $Target.NewName = ''; $Target.NewPath = ''
+  return $true
+}
+
+# 番号が変わったあとに、番号のある行の新しい名前と状態を作り直す（'multi' と 'skip' はそのまま）。
+# 同じ番号が2つ以上のフォルダにあれば、その行はすべて 'dupcode'（違うフォルダに同じ番号を付けない）
+function Update-TargetStates($Targets, [hashtable]$Titles) {
+  $all = @($Targets)
+  foreach ($t in $all) { if ($t.Code -and $t.State -notin 'multi', 'skip') { $t.State = 'pending'; $t.NewName = ''; $t.NewPath = '' } }
+  Set-RenameNames $all $Titles
+  $live = @($all | Where-Object { $_.Code -and $_.State -notin 'multi', 'skip', 'nocode' })
+  foreach ($grp in @($live | Group-Object Code)) {
+    if (@($grp.Group | ForEach-Object Path | Select-Object -Unique).Count -gt 1) { foreach ($t in $grp.Group) { $t.State = 'dupcode' } }
   }
 }
 
