@@ -645,8 +645,8 @@ function Show-RenameDialog {
     }
     if ($r.Log) { $msg += "`n`n記録: $(Split-Path $r.Log -Leaf)（「フォルダ名を戻す…」で戻せます）" }
     Show-Info $msg 'フォルダ名をそろえた結果'
-    # フォルダ名が変わったので、候補を調べ直してチェックし直す
-    Run-Check
+    # フォルダ名が変わったので、候補を調べ直してチェックし直す。④ で外したチェックは今のまま残す
+    Run-Check -KeepChecks
   } })
   $btnCancel = New-Button 'キャンセル' $null
   $btnCancel.Add_Click({ $dlg.Close() })
@@ -673,7 +673,7 @@ function Undo-Rename {
     $msg += "`n`n戻さなかったもの $(@($u.Skipped).Count) 件:`n" + ((@($u.Skipped) | Select-Object -First 10 | ForEach-Object { "・$($_.Name)`n  → $($_.Reason)" }) -join "`n")
   }
   Show-Info $msg '戻した結果'
-  if ($script:Results) { Run-Check }
+  if ($script:Results) { Run-Check -KeepChecks }
 }
 
 function Fill-Grid {

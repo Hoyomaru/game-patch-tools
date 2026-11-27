@@ -3,6 +3,8 @@
 
 # 新しいフルパスの長さの上限（Windows の 260 文字より少し余裕を持たせる）
 $script:RenameMaxPath = 240
+# 版の文字（Get-FolderVersion と同じ形）
+$script:VersionRe = '(?i)(?:(?<![a-z0-9])ver(?:sion)?\.?\s*|(?<![a-z0-9])v)\d+(?:[._\-]\d+)*[a-z]?(?![\w.])'
 
 # ---------- 1. 新しい名前を作る ----------
 
@@ -20,16 +22,36 @@ function ConvertTo-SafeFileName([string]$s) {
 }
 
 # 「RJ番号 正式な作品名 v版」（版は今の名前から読めたときだけ）。アーカイブは元の拡張子を付ける。
-# 親のパスと合わせて $script:RenameMaxPath を超えるときは、作品名を切り詰める
-function New-RenameName([string]$Code, [string]$Title, [string]$OldName, [bool]$IsArchive, [string]$ParentPath) {
+#   ・作品名の中の版の文字（「Ver2」など）は取り除く。残すと、変えたあとに Get-FolderVersion が作品名の方の版を読んでしまう
+#   ・親のパスと合わせて $script:RenameMaxPath を超えるときは、作品名を切り詰める
+#   ・$InnerLen（フォルダの中のいちばん長いパスの、フォルダより後ろの長さ）を渡すと、中のファイルも 259 文字に収まるようにする。
+#     もともと超えていたものは、今の名前より長くしない
+# 作品名が空になったら '' を返す
+function New-RenameName([string]$Code, [string]$Title, [string]$OldName, [bool]$IsArchive, [string]$ParentPath, [int]$InnerLen = 0) {
   $ext = ''; $base = $OldName
   if ($IsArchive) { $ext = [IO.Path]::GetExtension($OldName); $base = [IO.Path]::GetFileNameWithoutExtension($OldName) }
   $ver = Get-FolderVersion $base
   $tail = $(if ($ver) { " v$ver" } else { '' }) + $ext
-  $t = ConvertTo-SafeFileName $Title
-  $room = $script:RenameMaxPath - $ParentPath.TrimEnd('\').Length - 1 - ($Code.Length + 1) - $tail.Length
+  $t = $Title -replace $script:VersionRe, ' ' -replace '\(\s*\)|\[\s*\]|（\s*）|【\s*】', ' '
+  $t = ConvertTo-SafeFileName $t
+  if (-not $t) { return '' }
+  $p = $ParentPath.TrimEnd('\').Length + 1
+  $nameMax = [Math]::Min($script:RenameMaxPath - $p, 259 - $p - $InnerLen)
+  $nameMax = [Math]::Max($nameMax, $OldName.Length)
+  $room = $nameMax - ($Code.Length + 1) - $tail.Length
   if ($t.Length -gt $room) { $t = (ConvertTo-SafeFileName $t.Substring(0, [Math]::Max(1, $room))) }
+  if (-not $t) { return '' }
   return "$Code $t$tail"
+}
+
+# フォルダの中のいちばん長いパスの、フォルダより後ろの長さ（先頭の \ を含む）。中が空なら 0
+function Get-InnerPathLength([string]$Path) {
+  $max = 0
+  foreach ($f in @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue)) {
+    $n = $f.FullName.Length - $Path.TrimEnd('\').Length
+    if ($n -gt $max) { $max = $n }
+  }
+  return $max
 }
 
 # ---------- 2. 名前を変える対象を選ぶ ----------
@@ -53,7 +75,9 @@ function Get-RenameTargets($Wishlist, $Candidates, [double]$Threshold, $Links, [
     $parent = Split-Path -Parent $c.Path
     $pc = $byPath[$parent]
     if ($pc -and -not $pc.Code -and $pc.Norm -eq $c.Norm) { $c = $pc }
-    if ($roots.ContainsKey(([string]$c.Path).TrimEnd('\'))) { continue }
+    # ゲームフォルダそのものと、その親にあたるもの（名前を変えると ② の登録先が見つからなくなる）は変えない
+    $cp = ([string]$c.Path).TrimEnd('\')
+    if ($roots.ContainsKey($cp) -or @($roots.Keys | Where-Object { $_.StartsWith($cp + '\', [StringComparison]::OrdinalIgnoreCase) }).Count) { continue }
     $key = [string]$c.Path
     if (-not $groups.Contains($key)) { $groups[$key] = @{ Cand = $c; Hits = New-Object System.Collections.Generic.List[object] } }
     if (-not @($groups[$key].Hits | Where-Object Code -eq $r.Code).Count) { $groups[$key].Hits.Add($r) }
@@ -77,7 +101,9 @@ function Set-RenameNames($Targets, [hashtable]$Titles) {
     $title = $Titles[$t.Code]
     if (-not $title) { $t.State = 'notitle'; continue }
     $parent = Split-Path -Parent $t.Path
-    $t.NewName = New-RenameName $t.Code $title $t.OldName $t.IsArchive $parent
+    $inner = if ($t.IsArchive) { 0 } else { Get-InnerPathLength $t.Path }
+    $t.NewName = New-RenameName $t.Code $title $t.OldName $t.IsArchive $parent $inner
+    if (-not $t.NewName) { $t.State = 'notitle'; continue }
     $t.NewPath = Join-Path $parent $t.NewName
     $t.State = if (Test-Path -LiteralPath $t.NewPath) { 'exists' } else { 'ok' }
   }

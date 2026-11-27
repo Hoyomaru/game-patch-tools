@@ -170,3 +170,36 @@ Describe 'Invoke-FolderRename / Undo-FolderRename' {
     @($u.Skipped).Count | Should Be 1
   }
 }
+
+Describe '最終レビューで見つかった点' {
+  It '作品名の中の版の文字は取り除く（変えたあとも手元の版を読める）' {
+    $n = New-RenameName 'RJ01234567' '架空 Ver2' 'x v1.5' $false 'E:\Games'
+    $n | Should Be 'RJ01234567 架空 v1.5'
+    Get-FolderVersion $n | Should Be '1.5'
+  }
+  It '版の文字を取り除いて作品名が空になったら notitle' {
+    $g = Join-Path $TestDrive 'emptytitle'
+    New-TestDirs $g @('z')
+    $t = [pscustomobject]@{ Code = 'RJ00000051'; Path = (Join-Path $g 'z'); OldName = 'z'; IsArchive = $false; How = '作品名が一致'; State = 'pending'; NewName = ''; NewPath = '' }
+    Set-RenameNames @($t) @{ 'RJ00000051' = 'Ver.2' }
+    $t.State | Should Be 'notitle'
+  }
+  It 'フォルダの中のいちばん深いファイルも 259 文字に収まるように切り詰める' {
+    $g = Join-Path $TestDrive 'deep'
+    $inner = 'a\' + ('d' * 40) + '\' + ('e' * 40) + '\' + ('f' * 40)
+    New-TestDirs $g @($inner)
+    $file = Join-Path (Join-Path $g $inner) 'file.txt'
+    [IO.File]::WriteAllText($file, 'x')
+    $t = [pscustomobject]@{ Code = 'RJ00000052'; Path = (Join-Path $g 'a'); OldName = 'a'; IsArchive = $false; How = '作品名が一致'; State = 'pending'; NewName = ''; NewPath = '' }
+    Set-RenameNames @($t) @{ 'RJ00000052' = ('あ' * 120) }
+    $t.State | Should Be 'ok'
+    ($t.NewPath.Length + ($file.Length - $t.Path.Length)) | Should Not BeGreaterThan 259
+  }
+  It '② に登録したゲームフォルダの親にあたる候補は対象にしない' {
+    $g3 = Join-Path $TestDrive 'games3'
+    New-TestDirs $g3 @('おや\こ')
+    $dirs = @($g3, (Join-Path $g3 'おや\こ'))
+    $c3 = Get-GameCandidates @($g3) 2
+    @(Get-RenameTargets @(W 'RJ00000053' 'おや') $c3 0.6 (New-TestLinks) $dirs).Count | Should Be 0
+  }
+}
