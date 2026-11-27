@@ -558,18 +558,18 @@ $RenameStateText = @{
 }
 $RenameClueText = @{
   bookmark = 'ブックマークと一致'; inside = '中に書いてある'; 'search-exact' = 'DLsite で検索（一致）'
-  search = 'DLsite で検索（候補）'; manual = '自分で入れた'; '' = '見つからなかった'
+  search = 'DLsite で検索（候補）'; manual = '自分で入れた'; store = 'お店の URL'; '' = '見つからなかった'
 }
 # 取った正式な作品名（RJ番号 → 作品名）。画面を開き直しても取り直さない
 $script:RenameTitles = @{}
 
-# 正式な作品名を、まだ取っていない番号だけ DLsite から取る（送るのは RJ番号だけ）。取れなかった数を返す
+# 正式な作品名を、まだ取っていない番号だけ DLsite・Steam・FANZA から取る（送るのは番号だけ）。取れなかった数を返す
 function Update-RenameTitles([string[]]$Codes) {
   $need = @($Codes | Where-Object { $_ -and -not $script:RenameTitles.ContainsKey($_) } | Select-Object -Unique)
   if ($need.Count -eq 0) { return 0 }
-  $got = Get-DLsiteTitles $need
+  $got = Get-StoreTitles $need
   foreach ($k in $got.Keys) { $script:RenameTitles[$k] = $got[$k] }
-  return [int]$script:DLsiteFailedCount
+  return [int]$script:StoreFailedCount
 }
 
 # 検索する言葉を1件ずつ DLsite で検索し、結果を $Cache に入れて保存する。進み具合と「止める」を出す。検索した数を返す
@@ -628,7 +628,8 @@ function Show-RenameDialog {
     $wish = @(Get-OwnedWishlist $sources (Get-SelectedFolder) $BackupDir)
     $known = @(Get-RenameTargets $wish $cands ([double]$numTh.Value) $script:Links $dirs)
     # ブックマークで当たった候補と「たぶん」の候補は、ブックマークにない作品として扱わない
-    $excl = @(@($script:Results | Where-Object { $_.Status -in 'owned', 'maybe' -and $_.MatchPath } | ForEach-Object MatchPath) + @($known | ForEach-Object Path))
+    $excl = @(@($script:Results | Where-Object { $_.Status -in 'owned', 'maybe' -and $_.MatchPath } | ForEach-Object MatchPath) + @($known | ForEach-Object Path) +
+              @(Get-RenamedPaths $RenameLogDir))  # 一度そろえたフォルダ（RJ番号のない名前でも）は、もう出さない
     $lblStatus.Text = 'ブックマークにない作品を調べています…'; $form.Refresh()
     $unknown = @(Get-UnknownTargets $cands $excl $dirs {
       param($i, $n)
@@ -682,9 +683,10 @@ function Show-RenameDialog {
   $dlg.Controls.Add($lay)
 
   $note = "チェックしたフォルダの名前を「RJ番号 正式な作品名 v版」に変えます（版は今の名前から読めたときだけ）。`n" +
-          "最初からチェックが付くのは、手がかりが確かなものだけです。「DLsite で検索（候補）」の行は、RJ番号の欄で候補を選ぶか、右クリックで番号を入れてください（RJ番号の欄をダブルクリックで DLsite のページを開きます）。`n" +
+          "最初からチェックが付くのは、手がかりが確かなものだけです。「DLsite で検索（候補）」の行は、番号の欄で候補を選ぶか、右クリックで番号を入れてください（番号の欄をダブルクリックで作品のページを開きます）。`n" +
+          "DLsite 以外で買った作品は、右クリックで Steam・FANZA の作品ページの URL を貼ると「Steam 番号 正式な作品名 v版」にそろえます。ほかのお店は作品名を自分で入れられます。`n" +
           "「決め手」が「作品名が一致」のものは、同じ作品か気になるならチェックを外してください。変えた記録を残すので、「フォルダ名を戻す…」で戻せます。" +
-          $(if ($failedFetch) { "`n※ $failedFetch 件は DLsite から作品名を取れませんでした（ネットにつながっているか確かめてください）。" } else { '' })
+          $(if ($failedFetch) { "`n※ $failedFetch 件はお店から作品名を取れませんでした（ネットにつながっているか確かめてください）。" } else { '' })
   $lay.Controls.Add((New-Label $note), 0, 0)
 
   $rg = New-Object System.Windows.Forms.DataGridView
@@ -700,7 +702,7 @@ function Show-RenameDialog {
   $col.Name = 'Old'; $col.HeaderText = '今の名前'; $col.Width = (px 260); $col.ReadOnly = $true
   [void]$rg.Columns.Add($col)
   $cb = New-Object System.Windows.Forms.DataGridViewComboBoxColumn
-  $cb.Name = 'Code'; $cb.HeaderText = 'RJ番号'; $cb.Width = (px 260); $cb.DisplayStyle = 'DropDownButton'; $cb.FlatStyle = 'Flat'
+  $cb.Name = 'Code'; $cb.HeaderText = '番号'; $cb.Width = (px 260); $cb.DisplayStyle = 'DropDownButton'; $cb.FlatStyle = 'Flat'
   [void]$rg.Columns.Add($cb)
   foreach ($c in @(
     @{ N = 'New';   H = '新しい名前'; W = 300 },
@@ -716,14 +718,24 @@ function Show-RenameDialog {
   # 選べない値などで出る表示のエラーは出さない
   $rg.Add_DataError({ param($s, $e) $e.ThrowException = $false })
 
-  # 行の RJ番号の候補（「RJ… 作品名」）。今の番号が候補になければ先頭に足す
+  # 候補の表示の文字。自分で入れたものは「（自分で入れた）お店 作品名」
+  $codeLabel = { param([string]$code, [string]$title)
+    if ($code -match '^Manual:') { return ('（自分で入れた）' + ("$(Get-CodePrefix $code) $(Get-ManualTitle $code)").Trim()) }
+    if ($title) { return "$code $title" }
+    return $code
+  }
+  # 行の番号の候補。今の番号が候補になければ先頭に足す。表示の文字 → Code の対応を $t.ChoiceMap に持つ
   $choiceText = { param($t)
-    $items = @(@($t.Choices) | Where-Object { $_ } | ForEach-Object { if ($_.Title) { "$($_.Code) $($_.Title)" } else { [string]$_.Code } })
-    if ($t.Code -and -not @($items | Where-Object { $_ -eq $t.Code -or $_.StartsWith($t.Code + ' ') }).Count) {
-      $label = if ($script:RenameTitles[$t.Code]) { "$($t.Code) $($script:RenameTitles[$t.Code])" } else { [string]$t.Code }
-      $items = @($label) + $items
+    $map = [ordered]@{}
+    foreach ($c in @(@($t.Choices) | Where-Object { $_ })) { $map[(& $codeLabel ([string]$c.Code) ([string]$c.Title))] = [string]$c.Code }
+    if ($t.Code -and -not @($map.Values | Where-Object { $_ -eq $t.Code }).Count) {
+      $first = [ordered]@{}
+      $first[(& $codeLabel ([string]$t.Code) ([string]$script:RenameTitles[$t.Code]))] = [string]$t.Code
+      foreach ($k in $map.Keys) { if (-not $first.Contains($k)) { $first[$k] = $map[$k] } }
+      $map = $first
     }
-    return ,$items
+    $t | Add-Member -NotePropertyName ChoiceMap -NotePropertyValue $map -Force
+    return ,@($map.Keys)
   }
   # 行の表示を、その行の対象（Tag）に合わせる
   $paintRow = { param($row)
@@ -732,7 +744,7 @@ function Show-RenameDialog {
     $items = & $choiceText $t
     $cell.Items.Clear()
     foreach ($it in $items) { [void]$cell.Items.Add($it) }
-    $cell.Value = $(if ($t.Code) { @($items | Where-Object { $_ -eq $t.Code -or $_.StartsWith($t.Code + ' ') })[0] } else { $null })
+    $cell.Value = $(if ($t.Code) { @($items | Where-Object { $t.ChoiceMap[$_] -eq $t.Code })[0] } else { $null })
     $cell.ReadOnly = $t.State -eq 'multi' -or $t.Clue -eq 'bookmark' -or $items.Count -eq 0
     $row.Cells['New'].Value = $t.NewName
     $row.Cells['Clue'].Value = $RenameClueText[[string]$t.Clue]
@@ -744,15 +756,9 @@ function Show-RenameDialog {
     $row.DefaultCellStyle.ForeColor = $(if ($ok -or $t.State -eq 'nocode') { [System.Drawing.SystemColors]::ControlText } else { [System.Drawing.SystemColors]::GrayText })
   }
   # 番号を決めた・変えたあと：作品名を取り、全部の行の状態を作り直して描き直す。その行はチェックを付ける
-  $applyCode = { param($row, [string]$text, [bool]$manual)
+  # 全部の行の状態を作り直して描き直す。$row の行は、変えられるならチェックを付ける
+  $refreshRows = { param($row)
     $t = $row.Tag
-    $clue = $t.Clue
-    if (-not (Set-TargetCode $t $text)) { Show-Info 'RJ番号（RJ01234567 など）か、DLsite の作品ページの URL を入れてください。'; return }
-    if (-not $manual) { $t.Clue = $(if ($clue -eq 'inside') { 'inside' } else { 'search' }) }
-    if (-not $script:RenameTitles.ContainsKey($t.Code)) {
-      $dlg.Cursor = 'WaitCursor'
-      try { [void](Update-RenameTitles @($t.Code)) } finally { $dlg.Cursor = 'Default' }
-    }
     Update-TargetStates $targets $script:RenameTitles
     $script:RenameFilling = $true
     try {
@@ -762,6 +768,37 @@ function Show-RenameDialog {
       if ($t.State -eq 'ok') { $row.Cells['Do'].Value = $true }
     } finally { $script:RenameFilling = $false }
     $btnGo.Enabled = @($targets | Where-Object State -eq 'ok').Count -gt 0
+  }
+  # 作品名（とお店の名前）を自分で入れる。$store はお店の名前の初期値（Steam の番号など）
+  $askManual = { param($row, [string]$store, [string]$why)
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    $title = [Microsoft.VisualBasic.Interaction]::InputBox("$why「$($row.Tag.OldName)」の正式な作品名:", '作品名を入れる', '')
+    if (-not $title.Trim()) { & $refreshRows $row; return }
+    $shop = [Microsoft.VisualBasic.Interaction]::InputBox("お店の名前（フォルダ名の頭に付けます。空でもよい）:", 'お店の名前', $store)
+    $code = Set-TargetManual $row.Tag $shop $title
+    $script:RenameTitles[$code] = $title.Trim()
+    & $refreshRows $row
+  }
+  # 番号を決めた・変えたあと：作品名を取り、全部の行を描き直す。$manual は右クリックで入れたとき
+  $applyCode = { param($row, [string]$text, [bool]$manual)
+    $t = $row.Tag
+    $clue = $t.Clue
+    if (-not (Set-TargetCode $t $text)) {
+      if ($manual) { & $askManual $row '' "番号や対応しているお店の URL ではなかったので、作品名を入れてください。`n`n" }
+      else { Show-Info 'RJ番号（RJ01234567 など）か、DLsite・Steam・FANZA の作品ページの URL を入れてください。' }
+      return
+    }
+    if (-not $manual) { $t.Clue = $(if ($clue -eq 'inside') { 'inside' } elseif ($t.Code -match '^(Steam|FANZA) ') { 'store' } else { 'search' }) }
+    if (-not $script:RenameTitles.ContainsKey($t.Code)) {
+      $dlg.Cursor = 'WaitCursor'
+      try { [void](Update-RenameTitles @($t.Code)) } finally { $dlg.Cursor = 'Default' }
+    }
+    # Steam・FANZA で作品名が取れなかったら、作品名を入れてもらう（頭は「Steam 番号」のまま）
+    if ($manual -and $t.Code -match '^(Steam|FANZA) ' -and -not $script:RenameTitles[$t.Code]) {
+      & $askManual $row $t.Code "$($t.Code) の作品名をお店から取れませんでした。`n`n"
+      return
+    }
+    & $refreshRows $row
   }
 
   $script:RenameFilling = $true
@@ -778,20 +815,20 @@ function Show-RenameDialog {
     if ($script:RenameFilling -or $e.RowIndex -lt 0 -or $rg.Columns[$e.ColumnIndex].Name -ne 'Code') { return }
     $row = $rg.Rows[$e.RowIndex]
     $v = [string]$row.Cells['Code'].Value
-    if ($v -and $v -notmatch ('^' + [regex]::Escape([string]$row.Tag.Code) + '(\s|$)')) { & $applyCode $row $v $false }
-    elseif ($v -and -not $row.Tag.Code) { & $applyCode $row $v $false }
+    $code = if ($v -and $row.Tag.ChoiceMap -and $row.Tag.ChoiceMap.Contains($v)) { [string]$row.Tag.ChoiceMap[$v] } else { '' }
+    if ($code -and $code -ne [string]$row.Tag.Code) { & $applyCode $row $code $false }
   } })
   $rg.Add_CellDoubleClick({ param($s, $e) Invoke-Safe {
     if ($e.RowIndex -lt 0) { return }
     $t = $rg.Rows[$e.RowIndex].Tag
     $name = $rg.Columns[$e.ColumnIndex].Name
-    if ($name -eq 'Code' -and $t.Code) { Start-Process "https://www.dlsite.com/maniax/work/=/product_id/$($t.Code).html" }
+    if ($name -eq 'Code' -and $t.Code) { $u = Get-StorePageUrl $t.Code; if ($u) { Start-Process $u } }
     elseif ($name -eq 'Old') { Start-Process explorer.exe "/select,`"$($t.Path)`"" }
   } })
   # 右クリック：RJ番号を自分で入れる
   $rmenu = New-Object System.Windows.Forms.ContextMenuStrip
   $rmenu.Font = $Font
-  $miCode = $rmenu.Items.Add('RJ番号を入れる…（DLsite の URL でもよい）')
+  $miCode = $rmenu.Items.Add('番号・お店の URL を入れる…（DLsite・Steam・FANZA。ほかは作品名を入れる）')
   $rg.ContextMenuStrip = $rmenu
   $script:RenameMenuRow = -1
   $rg.Add_CellMouseDown({ param($s, $e) if ($e.Button -eq 'Right' -and $e.RowIndex -ge 0) { $script:RenameMenuRow = $e.RowIndex } })
@@ -802,8 +839,10 @@ function Show-RenameDialog {
   $miCode.Add_Click({ Invoke-Safe {
     $row = $rg.Rows[$script:RenameMenuRow]
     Add-Type -AssemblyName Microsoft.VisualBasic
-    $v = [Microsoft.VisualBasic.Interaction]::InputBox("「$($row.Tag.OldName)」の RJ番号か、DLsite の作品ページの URL:", 'RJ番号を入れる', [string]$row.Tag.Code)
-    if ($v.Trim()) { & $applyCode $row $v $true }
+    $cur = if ([string]$row.Tag.Code -match '^Manual:') { '' } else { [string]$row.Tag.Code }
+    $v = [Microsoft.VisualBasic.Interaction]::InputBox("「$($row.Tag.OldName)」の RJ番号か、作品ページの URL（DLsite・Steam・FANZA）:`n`nほかのお店の作品は、そのまま OK を押すと作品名を入れる欄に進みます。", '番号・URL を入れる', $cur)
+    # 空のまま OK（または取り消し）なら、作品名を入れる欄に進む（そこで取り消せば何もしない）
+    if ($v.Trim()) { & $applyCode $row $v $true } else { & $askManual $row '' '' }
   } })
   $lay.Controls.Add($rg, 0, 1)
 
